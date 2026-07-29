@@ -47,6 +47,15 @@ class WallSurfaces:
                      "linked two runs on opposite sides of the part - the twist "
                      "can look innocent while the surface flies across it",
                      default=3.0)
+        add_property(obj, "App::PropertyLength", "OverlapDistance", GROUP_GRID,
+                     "How far apart two runs may lie and still count as the "
+                     "same wall. 0 derives it from the section spacing",
+                     default=0.0)
+        add_property(obj, "App::PropertyFloat", "MinOverlap", GROUP_GRID,
+                     "Fraction of a run that must lie over its neighbour before "
+                     "they are chained. Wall runs fragment differently from "
+                     "section to section, and the centroid of a fragment is an "
+                     "accident of where it broke", default=0.3)
         add_property(obj, "App::PropertyEnumeration", "Method", GROUP_GRID,
                      "Interpolate passes a surface through the grid points. "
                      "Gordon treats the grid as a curve network - rows as "
@@ -89,6 +98,24 @@ class WallSurfaces:
             index += count
         return groups
 
+    @staticmethod
+    def auto_threshold(groups, normal):
+        """How far a wall may move sideways between two sections.
+
+        Taken from the sections themselves: the distance between neighbouring
+        planes, times a small factor.  A wall on a steep part moves further per
+        section than one on a straight part, and the spacing is the only thing
+        in the data that knows the difference.
+        """
+        offsets = []
+        for section in groups:
+            if section:
+                offsets.append(float(np.dot(ct.centroid(section[0]), normal)))
+        if len(offsets) < 2:
+            return 1.0
+        spacing = float(np.median(np.abs(np.diff(sorted(offsets)))))
+        return max(spacing * 2.0, 1e-6)
+
     def execute(self, obj):
         groups = self.runs_by_section(obj)
         if len(groups) < 2:
@@ -99,9 +126,11 @@ class WallSurfaces:
             direction = getattr(getattr(obj, "Source", None), "Direction", None)
             normal = (np.array([direction.x, direction.y, direction.z])
                       if direction is not None else np.array([0.0, 0.0, 1.0]))
-            centroids = [[ct.centroid(run) for run in section]
-                         for section in groups]
-            chains, _ambiguous = pr.build_chains(centroids, normal)
+            threshold = value(obj.OverlapDistance)
+            if threshold <= 0.0:
+                threshold = self.auto_threshold(groups, normal)
+            chains = pr.build_chains_by_overlap(
+                groups, normal, threshold, float(obj.MinOverlap))
 
             wanted_gordon = str(obj.Method) == "Gordon" and sf.gordon_available()
             if str(obj.Method) == "Gordon" and not wanted_gordon:

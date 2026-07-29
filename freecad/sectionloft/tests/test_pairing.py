@@ -53,6 +53,76 @@ class TestMatchPair(unittest.TestCase):
         self.assertEqual(pr.match_pair([], [[0, 0, 0]], np.array(Z)), ({}, []))
 
 
+def run_at(x0, x1, y, z, count=20):
+    """A straight wall run along x, at height z."""
+    xs = np.linspace(x0, x1, count)
+    return np.column_stack((xs, np.full(count, float(y)),
+                            np.full(count, float(z))))
+
+
+class TestOverlap(unittest.TestCase):
+    """Wall runs fragment differently from section to section, so the centroid
+    of a fragment is an accident of where it broke."""
+
+    def test_the_same_stretch_scores_high(self):
+        a = run_at(0, 10, 0, 0)
+        b = run_at(0, 10, 0.1, 1)
+        self.assertGreater(pr.overlap_score(a, b, np.array(Z), 0.5), 0.9)
+
+    def test_a_different_stretch_scores_zero(self):
+        a = run_at(0, 10, 0, 0)
+        b = run_at(40, 50, 0, 1)
+        self.assertEqual(pr.overlap_score(a, b, np.array(Z), 0.5), 0.0)
+
+    def test_partial_overlap_is_limited_by_the_smaller_share(self):
+        """A short run buried inside a long one must not score as a match for
+        the whole of it."""
+        a = run_at(0, 20, 0, 0)
+        b = run_at(0, 5, 0, 1)
+        score = pr.overlap_score(a, b, np.array(Z), 0.5)
+        self.assertGreater(score, 0.2)
+        self.assertLess(score, 0.4)
+
+    def test_centroids_would_have_got_this_wrong(self):
+        """Two pieces of one wall, broken at different places: their centroids
+        are far apart while the runs plainly overlap.
+
+        Sampled densely on purpose - the threshold has to exceed the spacing
+        between points or nothing can ever be found near anything.
+        """
+        a = run_at(0, 20, 0, 0, count=120)
+        b = run_at(10, 30, 0, 1, count=120)
+        centre_distance = np.linalg.norm(a.mean(axis=0)[:2] - b.mean(axis=0)[:2])
+        self.assertGreater(centre_distance, 4.0)
+        self.assertGreater(pr.overlap_score(a, b, np.array(Z), 0.5), 0.4)
+
+
+class TestOverlapChains(unittest.TestCase):
+    def test_a_wall_running_up_the_part_becomes_one_chain(self):
+        runs = [[run_at(0, 10, 0, z)] for z in range(6)]
+        chains = pr.build_chains_by_overlap(runs, Z, 0.5)
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(len(chains[0]), 6)
+
+    def test_two_walls_stay_apart(self):
+        runs = [[run_at(0, 10, 0, z), run_at(40, 50, 0, z)] for z in range(5)]
+        chains = pr.build_chains_by_overlap(runs, Z, 0.5)
+        self.assertEqual(len(chains), 2)
+        for chain in chains:
+            self.assertEqual(len(chain), 5)
+
+    def test_a_wall_that_starts_halfway_gets_its_own_chain(self):
+        runs = [[run_at(0, 10, 0, z)] for z in range(3)]
+        runs += [[run_at(0, 10, 0, z), run_at(40, 50, 0, z)] for z in range(3, 6)]
+        chains = pr.build_chains_by_overlap(runs, Z, 0.5)
+        self.assertEqual(sorted(len(c) for c in chains), [3, 6])
+
+    def test_runs_too_far_apart_do_not_chain(self):
+        runs = [[run_at(0, 10, 0, 0)], [run_at(0, 10, 40, 1)]]
+        chains = pr.build_chains_by_overlap(runs, Z, 0.5)
+        self.assertEqual(len(chains), 2)
+
+
 class TestChains(unittest.TestCase):
     def test_single_body_gives_one_chain(self):
         centroids = stack([(0, 0)], [0, 10, 20, 30])

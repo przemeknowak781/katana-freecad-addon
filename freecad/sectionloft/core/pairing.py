@@ -67,6 +67,97 @@ def match_pair(previous, current, direction, ambiguity_ratio=AMBIGUITY_RATIO):
     return mapping, sorted(ambiguous)
 
 
+def _flatten(points, direction):
+    """Drop the component along ``direction`` so parallel sections compare."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    return pts - np.outer(pts @ direction, direction)
+
+
+def overlap_score(first, second, direction, threshold):
+    """How much of two runs lies on top of each other, seen along the sections.
+
+    Returns 0 to 1: the smaller of the two fractions, so a short run buried
+    inside a long one does not score as a match for the whole of it.
+
+    This is what a centroid cannot say.  Wall runs fragment differently from one
+    section to the next, and the centroid of a fragment is an accident of where
+    it happened to break; two pieces of the same wall can have centroids far
+    apart while two unrelated pieces can have them close.  Overlap asks the
+    question directly - is this the same stretch of wall?
+    """
+    a = _flatten(first, direction)
+    b = _flatten(second, direction)
+    if len(a) == 0 or len(b) == 0:
+        return 0.0
+
+    limit = float(threshold)
+    near_a = np.array([np.linalg.norm(b - point, axis=1).min() <= limit
+                       for point in a])
+    near_b = np.array([np.linalg.norm(a - point, axis=1).min() <= limit
+                       for point in b])
+    return float(min(near_a.mean(), near_b.mean()))
+
+
+def match_by_overlap(previous, current, direction, threshold, minimum=0.3):
+    """One-to-one greedy match between two sets of runs, best overlap first."""
+    if not len(previous) or not len(current):
+        return {}
+
+    scored = []
+    for i, first in enumerate(previous):
+        for j, second in enumerate(current):
+            score = overlap_score(first, second, direction, threshold)
+            if score >= minimum:
+                scored.append((-score, i, j))
+    scored.sort()
+
+    mapping = {}
+    taken = set()
+    for _score, i, j in scored:
+        if i in mapping or j in taken:
+            continue
+        mapping[i] = j
+        taken.add(j)
+    return mapping
+
+
+def build_chains_by_overlap(runs_per_section, direction, threshold,
+                            minimum=0.3):
+    """Chain runs across sections by how much of each lies over the next.
+
+    Same shape of answer as :func:`build_chains` - a list of
+    ``(section_index, run_index)`` chains - but matched on overlap rather than
+    on centroid distance, which is what wall runs need.
+    """
+    d = normalize(direction)
+    chains = []
+    open_chains = []
+
+    for section_index, runs in enumerate(runs_per_section):
+        next_open = {}
+        matched = set()
+
+        if open_chains and len(runs):
+            mapping = match_by_overlap([run for _, run in open_chains], runs,
+                                       d, threshold, minimum)
+            for i, j in mapping.items():
+                chain = open_chains[i][0]
+                chain.append((section_index, j))
+                next_open[j] = (chain, runs[j])
+                matched.add(j)
+
+        for j in range(len(runs)):
+            if j in matched:
+                continue
+            chain = [(section_index, j)]
+            chains.append(chain)
+            next_open[j] = (chain, runs[j])
+
+        open_chains = [next_open[j] for j in sorted(next_open)]
+
+    return chains
+
+
 def build_chains(centroids_per_section, direction, ambiguity_ratio=AMBIGUITY_RATIO):
     """Link contours across all sections into chains.
 
