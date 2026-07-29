@@ -11,9 +11,11 @@ back dead, so they live in modules and are never defined inside a script.
 from .section_set import SectionSet, make_section_set
 from .fitted_sections import FittedSections, make_fitted_sections
 from .section_loft import SectionLoft, make_section_loft
+from .wall_surfaces import WallSurfaces, make_wall_surfaces
 
 __all__ = [
     "SectionSet", "make_section_set",
     "FittedSections", "make_fitted_sections",
     "SectionLoft", "make_section_loft",
+    "WallSurfaces", "make_wall_surfaces",
 ]
