@@ -382,6 +382,34 @@ def track_corner_lines(profiles, angle_threshold, window=4, min_fraction=0.35,
             for section in range(len(profiles))]
 
 
+def split_in_order(points, indices):
+    """Split a closed contour at the given indices, in the order given.
+
+    Deliberately not sorted.  Tracked creases already come in an order that is
+    the same in every section of a chain, and sorting destroys it: a crease that
+    drifts across index zero sorts to the other end of the list and rotates
+    every segment's meaning, so segment *j* of one section stops corresponding
+    to segment *j* of its neighbour.  That is a twist the loft cannot recover
+    from.
+    """
+    pts = as_points(points)
+    size = len(pts)
+    marks = [int(i) % size for i in indices]
+    if len(marks) < 2 or size < 3:
+        return [pts]
+
+    segments = []
+    for k, start in enumerate(marks):
+        end = marks[(k + 1) % len(marks)]
+        if end == start:
+            continue
+        segment = (pts[start:end + 1] if end > start
+                   else np.vstack([pts[start:], pts[:end + 1]]))
+        if len(segment) >= 2:
+            segments.append(segment)
+    return segments or [pts]
+
+
 def split_at_indices(points, indices, closed=True):
     """Split a contour at explicit vertex indices, keeping full resolution.
 

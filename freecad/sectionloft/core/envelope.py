@@ -119,7 +119,13 @@ def smooth_radii(radii, window):
 
 def envelope_profile(polygons, centre, samples=DEFAULT_SAMPLES,
                      collapse_factor=0.5):
-    """Raw radii for one section: ``(material, hull)``.
+    """Raw radii for one section: ``(material, hull, centre)``.
+
+    The centre comes back because it may not be the one that was asked for: an
+    axis outside this section's hull gets slid inside, and radii measured from
+    one point but rebuilt around another produce a profile far larger than the
+    part.  On the test mesh that showed up as sections reaching 15 mm where the
+    mesh only reaches 9.5, and as a large flat fin on the lofted surface.
 
     ``material`` carries ``nan`` where the ray found nothing, or found only
     something so far inside the hull that it must have escaped through an
@@ -131,17 +137,17 @@ def envelope_profile(polygons, centre, samples=DEFAULT_SAMPLES,
     polys = [np.asarray(p, dtype=float).reshape(-1, 2) for p in polygons
              if len(p) >= 3]
     if not polys:
-        return None, None
+        return None, None, None
     starts, ends = _segments(polys)
     if starts is None:
-        return None, None
+        return None, None, None
 
     hull = convex_hull_2d(np.vstack(polys))
     if len(hull) < 3:
-        return None, None
+        return None, None, None
     hull_starts, hull_ends = _segments([hull])
-    if centre is None or not _point_in_polygon(centre, hull):
-        centre = hull.mean(axis=0)
+    centre = (hull.mean(axis=0) if centre is None
+              else clamp_into(centre, hull))
     centre = np.asarray(centre, dtype=float).reshape(2)
 
     angles = np.linspace(0.0, 2.0 * np.pi, int(samples), endpoint=False)
@@ -154,7 +160,7 @@ def envelope_profile(polygons, centre, samples=DEFAULT_SAMPLES,
         hit = _ray_hits(centre, direction, starts, ends)
         if hit is not None and hit >= collapse_factor * hull_radii[i]:
             material[i] = hit
-    return material, hull_radii
+    return material, hull_radii, centre
 
 
 def fill_along_axis(material, hull, smoothing=3):
@@ -227,8 +233,8 @@ def envelope_2d(polygons, centre=None, samples=DEFAULT_SAMPLES, smoothing=0,
     hull_starts, hull_ends = _segments([hull])
     # A centre outside the shape is not a centre: rays from it miss the material
     # over a wide arc and the profile collapses to zero radius there.
-    if centre is None or not _point_in_polygon(centre, hull):
-        centre = hull.mean(axis=0)
+    centre = (hull.mean(axis=0) if centre is None
+              else clamp_into(centre, hull))
     centre = np.asarray(centre, dtype=float).reshape(2)
 
     angles = np.linspace(0.0, 2.0 * np.pi, int(samples), endpoint=False)
@@ -367,6 +373,42 @@ def shared_axis(hulls):
         if hits == len(valid):
             break
     return best, len(valid) - best_hits
+
+
+def clamp_into(point, hull, margin=0.05):
+    """Nearest point inside ``hull`` to ``point``, stepped in by ``margin``.
+
+    Better than falling back to the hull's centroid.  The centroid of one
+    section sits somewhere quite different from the centroid of the next, and
+    since the profiles are radial about it, sections measured from different
+    centres carry different angles for the same feature.  A smooth loft across
+    that mismatch grows a fin - which is exactly what the test mesh did, at the
+    three sections that did not contain the shared axis.  Sliding the shared
+    axis just inside the hull keeps every section's angular reference as close
+    to the others as the geometry allows.
+    """
+    hull = np.asarray(hull, dtype=float).reshape(-1, 2)
+    point = np.asarray(point, dtype=float).reshape(2)
+    if _point_in_polygon(point, hull):
+        return point
+
+    centroid = hull.mean(axis=0)
+    best = centroid
+    best_distance = np.inf
+    for i in range(len(hull)):
+        a = hull[i]
+        b = hull[(i + 1) % len(hull)]
+        edge = b - a
+        length = float(np.dot(edge, edge))
+        t = 0.0 if length <= 0 else np.clip(np.dot(point - a, edge) / length,
+                                            0.0, 1.0)
+        candidate = a + t * edge
+        distance = float(np.linalg.norm(candidate - point))
+        if distance < best_distance:
+            best, best_distance = candidate, distance
+
+    inward = best + (centroid - best) * float(margin)
+    return inward if _point_in_polygon(inward, hull) else centroid
 
 
 def _point_in_polygon(point, polygon):

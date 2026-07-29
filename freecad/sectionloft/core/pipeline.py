@@ -250,17 +250,23 @@ def envelope_sections(mesh, params, planes, origin, direction):
                 else float(params.envelope_collapse_factor))
     material = np.full((len(planes), samples), np.nan)
     hull_radii = np.zeros((len(planes), samples))
+    centres = [None] * len(planes)
     usable = []
     for index, ((base, _normal), polygons) in enumerate(zip(planes, projected)):
         if not polygons:
             _warn("section %d: nothing to build an envelope from" % index)
             continue
-        row, hull_row = ev.envelope_profile(polygons, axis, samples, collapse)
+        row, hull_row, used = ev.envelope_profile(polygons, axis, samples,
+                                                  collapse)
         if row is None:
             _warn("section %d: could not build an envelope" % index)
             continue
         material[index] = row
         hull_radii[index] = hull_row
+        # The radii were measured from whatever centre this section could
+        # actually use; rebuilding the outline around a different one inflates
+        # it by the distance between the two.
+        centres[index] = used
         usable.append(index)
 
     if not usable:
@@ -281,7 +287,7 @@ def envelope_sections(mesh, params, planes, origin, direction):
         section = Section(index=index, base=base, normal=normal)
         row = row_by_index.get(index)
         if row is not None:
-            flat = axis + unit * row[:, None]
+            flat = centres[index] + unit * row[:, None]
             outline = base + flat[:, 0:1] * u + flat[:, 1:2] * v
             outline, _ = ct.unify_orientation(outline, normal, base)
             section.contours = [Contour(outline, True, index, False)]

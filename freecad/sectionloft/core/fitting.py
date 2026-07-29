@@ -107,6 +107,13 @@ def _degrees(params, n_points):
 def approximate_segment(points, params):
     """Fit one open segment.  Returns a ``Part`` curve.
 
+    Note on what is *not* done here: the parameter range is left to OCC.
+    Prescribing it - to give piece *j* the same range in every section, so that
+    a loft would match feature to feature - was tried and is a trap.  Passing
+    ``Parameters`` switches ``approximate`` to a different and much less stable
+    algorithm: measured on the test mesh, segments fitted that way reached
+    11.28 mm where their own polyline reached 8.72, before any joining.
+
     Two points degenerate to a line: handing a 2-point set to the approximator
     works but produces a spline where a line is both exact and cheaper.
     """
@@ -205,6 +212,25 @@ def seam_kink(curve):
     return float(np.arccos(cos))
 
 
+def two_sided_deviation(points, samples, closed):
+    """Largest distance in either direction between polyline and curve.
+
+    One direction alone is not a fit test.  Asking only whether every source
+    point lies near the curve lets the curve wander anywhere in between and
+    still score well: a corrupted reparameterisation sent profiles 5 mm outside
+    the mesh while this number read 0.248 mm against a 0.249 mm tolerance.  The
+    reverse question - is every point of the curve near the polyline - is the
+    one that catches it.
+    """
+    forward = pl.max_deviation(points, samples, closed=closed)
+    # The flag matters on both sides.  Measuring the curve against a contour
+    # treated as open leaves the closing stretch out of the reference, and every
+    # sample along it scores as a miss: 0.645 mm on a rectangle that the fit
+    # reproduces exactly.
+    backward = pl.max_deviation(samples, points, closed=closed)
+    return max(forward, backward)
+
+
 def curve_samples(edges, density):
     """Dense polyline through a list of edges, for deviation measurement."""
     out = []
@@ -263,7 +289,9 @@ def fit_contour(points, closed, params):
         if best is None or (result.ok and not best.ok) or (
                 result.ok and best.ok and result.deviation < best.deviation):
             best = result
-        if result.ok and result.deviation <= attempt.tolerance:
+        # Judged against what the caller asked for, not against the tightened
+        # tolerance a later attempt used to get there.
+        if result.ok and result.deviation <= params.tolerance:
             return result
     return best
 
@@ -280,6 +308,14 @@ def decimation_backoff(params):
         attempts.append(replace(params,
                                 decimate_factor=params.decimate_factor / 4.0))
         attempts.append(replace(params, decimate=False))
+    # Decimation is not the only way to miss the tolerance.  Approximation only
+    # promises that the *points* are within it, so the curve can still wander
+    # further between them - measured at 0.113 mm against a 0.100 mm tolerance
+    # on a plain arc.  Asking OCC for a tighter fit pulls the whole curve in,
+    # and fitting tighter than requested is always allowed.
+    last = attempts[-1]
+    for divisor in (2.0, 4.0):
+        attempts.append(replace(last, tolerance=params.tolerance / divisor))
     return attempts
 
 
@@ -297,7 +333,7 @@ def fit_contour_at(points, params, split_indices):
         if best is None or (result.ok and not best.ok) or (
                 result.ok and best.ok and result.deviation < best.deviation):
             best = result
-        if result.ok and result.deviation <= attempt.tolerance:
+        if result.ok and result.deviation <= params.tolerance:
             return result
     return best
 
@@ -306,16 +342,13 @@ def _fit_at_once(points, params, split_indices):
     result = FitResult(closed=True)
     result.tolerance_used = float(params.tolerance)
     try:
-        segments = pl.split_at_indices(points, split_indices, closed=True)
-        result.corners = sorted({int(i) for i in split_indices})
+        # In the order given, not sorted: the tracked creases already come in an
+        # order shared by every section, and sorting rotates it the moment one
+        # drifts across index zero.
+        segments = pl.split_in_order(points, split_indices)
+        result.corners = [int(i) for i in split_indices]
 
-        # One edge per segment, deliberately.  Joining them into a single
-        # B-spline with C0 knots was tried - it keeps the corners and lofts a
-        # single edge per profile - but each section then carries its own
-        # parameterisation, and makeLoft matches profiles by parameter: the
-        # surface folded to 30% of the volume its sections implied, and pinning
-        # the parameter ranges by segment index made it worse, not better.
-        edges = []
+        curves = []
         kept = []
         for segment in segments:
             piece = ct.drop_duplicates(segment, max(1e-7, params.tolerance * 1e-3))
@@ -325,19 +358,29 @@ def _fit_at_once(points, params, split_indices):
             if len(piece) < 2:
                 continue
             kept.append(piece)
-            edges.append(approximate_segment(piece, params).toShape())
+            curves.append(approximate_segment(piece, params))
 
-        if not edges:
+        if not curves:
             result.error = "every segment collapsed"
             return result
+
+        # One edge per segment.  Joining them into a single C0-knotted curve
+        # would let each profile reach the loft as one edge - which is faster
+        # and far more robust in OCC - but it was tried twice and both routes
+        # move the geometry: prescribing the parameter ranges pushes the
+        # segments themselves 2.5 mm off their own polyline, and joining without
+        # prescribing them overshoots just as badly further along.  Until that
+        # is understood, multi-edge profiles with a ruled surface are the
+        # combination that measures correctly.
+        edges = [curve.toShape() for curve in curves]
 
         result.points = np.vstack(kept)
         result.edges = edges
         result.wire = Part.Wire(edges)
         samples = curve_samples(edges, density=max(16, 4 * len(points)
                                                    // max(1, len(edges))))
-        result.deviation = pl.max_deviation(ct.as_points(points), samples,
-                                            closed=True)
+        result.deviation = two_sided_deviation(ct.as_points(points), samples,
+                                               closed=True)
     except Exception as exc:  # noqa: BLE001
         result.wire = None
         result.error = "%s: %s" % (type(exc).__name__, exc)
@@ -395,8 +438,8 @@ def _fit_once(points, closed, params):
         result.wire = Part.Wire(edges)
 
         samples = curve_samples(edges, density=max(32, 4 * len(pts) // max(1, len(edges))))
-        result.deviation = pl.max_deviation(
-            ct.as_points(points), samples, closed=closed and len(edges) == 1)
+        result.deviation = two_sided_deviation(ct.as_points(points), samples,
+                                               closed=closed)
     except Exception as exc:  # noqa: BLE001
         result.wire = None
         result.error = "%s: %s" % (type(exc).__name__, exc)

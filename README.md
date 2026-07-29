@@ -3,7 +3,7 @@
 Siatka wejściowa → rodzina przekrojów → dopasowane krzywe B-spline → loft, dla FreeCAD.
 
 **Status: v0.2.** Algorytm, trzy obiekty parametryczne, parowanie konturów między
-przekrojami, tryb obwiedni, kreator i workbench. 226 testów, wszystkie przechodzą
+przekrojami, tryb obwiedni, kreator i workbench. 227 testów, wszystkie przechodzą
 na FreeCAD 1.1.3. Sprawdzone na siatkach analitycznych i na prawdziwym skanie
 cienkościennej maski — ta ostatnia wymaga **trybu obwiedni**, w trybie konturów
 wychodzi bez sensu.
@@ -101,7 +101,7 @@ print(report.status)
 > (`robocopy ... /XF run_tests.py bench.py`) albo testuj z pustym
 > `FREECAD_USER_HOME`.
 
-226 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
+227 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
 panel nie importuje `FreeCADGui`, więc daje się zbudować na offscreenowym Qt
 i wyklikać programowo. Moduły `planes`, `contours`, `polyline` i `pairing` są
 czystym numpy i uruchamiają się zwykłym interpreterem:
@@ -282,6 +282,28 @@ liczba załamań jest ograniczona przez `MaxCorners` (domyślnie 8) — o czym n
 sąsiednimi profilami, więc punkt między nimi jest objęty tylko wtedy, gdy oba
 profile pokrywają jego wysokość.
 
+**6. Oś dosuwana do wnętrza przekroju, nie zastępowana jego środkiem.** Gdy
+wspólna oś wypada poza otoczką przekroju, poprzednio wracał środek tej otoczki —
+a to znaczy, że sąsiednie przekroje mierzyły profile od różnych punktów, więc
+ten sam element trafiał w nich pod innym kątem. Teraz oś jest przesuwana na
+najbliższy punkt wewnątrz otoczki, więc odniesienie kątowe pozostaje możliwie
+bliskie reszcie rodziny.
+
+**7. Błąd, przez który profile puchły.** `envelope_profile` mierzy promienie od
+środka, który faktycznie mógł zostać użyty, ale pipeline odtwarzał kontur wokół
+osi **pierwotnej**. Dla przekrojów, w których podmiana zadziałała, profil rósł
+o odległość między tymi punktami: zmierzone przekroje sięgały 15 mm na siatce,
+która sięga 9,5 mm, i to była ta wielka płaska płetwa na renderze. Funkcja
+zwraca teraz użyty środek, a pipeline go stosuje.
+
+**8. Odchyłka mierzona w obie strony.** Poprzednia miara pytała tylko, czy każdy
+punkt źródłowy leży blisko krzywej. Krzywa mogła przy tym wystrzelić w bok i
+nadal dostać dobrą ocenę — zepsuta parametryzacja wypychała profile 5 mm poza
+siatkę przy raportowanych 0,248 mm wobec tolerancji 0,249 mm. Pytanie odwrotne,
+czy każdy punkt krzywej leży blisko polilinii, łapie to natychmiast. Przy okazji
+drabina ponawiania dostała zacieśnianie tolerancji: aproksymacja obiecuje tylko,
+że *punkty* mieszczą się w tolerancji, a krzywa między nimi potrafi odbiec dalej.
+
 ### Czego nie udało się pogodzić
 
 **Powierzchnia prostokreślna jest wymuszona, gdy profile mają narożniki.**
@@ -292,14 +314,31 @@ done`. Gładki loft z takich profili przestrzeliwuje i wypuszcza płetwy poza
 część. Stąd `MaxCorners = 8` i zalecenie `Ruled = True` w trybie obwiedni —
 kosztem widocznych pasów na każdym przekroju.
 
-Próbowałem to obejść, sklejając segmenty w **jedną** krzywą z krotnością węzła
-równą stopniowi (`BSplineCurve.join`) — narożniki przeżywają, profil ma jedną
-krawędź, loft jest szybki. Nie weszło do wersji, bo każdy przekrój dostaje wtedy
-własną parametryzację, a `makeLoft` dopasowuje profile po parametrze: powierzchnia
-składała się do 30% objętości wynikającej z jej własnych przekrojów, a przypięcie
-przedziałów parametru do indeksu segmentu pogorszyło sprawę zamiast pomóc.
-Uważam to za właściwy kierunek na później, ale nie zostawię w kodzie czegoś, co
-psuje wynik.
+Sklejanie segmentów w **jedną** krzywą z krotnością węzła równą stopniowi
+(`BSplineCurve.join`) próbowałem dwukrotnie i dwukrotnie odpadło z różnych
+powodów. Narożniki przeżywają, profil ma jedną krawędź, loft schodzi z 25 s do
+0,05 s — ale geometria się przesuwa:
+
+- `join` nie zachowuje parametryzacji, z jaką segmenty były dopasowane. Sklejone
+  krzywe trzech sąsiednich przekrojów wyszły w zakresach [−0,227; 0,552],
+  [−0,222; 1,017] i [−0,331; 0,349], a loft dopasowuje profile po parametrze.
+- Przestawienie węzłów tak, by złączenia siadły na `j/n`, **zmienia kształt
+  krzywej** — bieguny i węzły razem definiują geometrię, więc nieafiniczna
+  zmiana węzłów to inna krzywa. To był mój błąd podstawowy i to on wypchnął
+  profile 5 mm poza siatkę.
+- Podanie jawnych `Parameters` do `approximate()` przełącza OCC na inny,
+  wyraźnie mniej stabilny algorytm: segmenty dopasowane tą drogą sięgały
+  11,28 mm przy własnej polilinii 8,72 mm, jeszcze przed sklejeniem.
+
+Właściwa droga to prawdopodobnie zbudowanie krzywej wprost z biegunów i węzłów
+segmentów (`buildFromPolesMultsKnots`), bez pośrednictwa `join` i bez
+przestawiania węzłów po fakcie. To robota na osobną iterację.
+
+**Dopasowania z narożnikami przestrzeliwują własną polilinię o około 1 mm.**
+Widać to dopiero od czasu wprowadzenia odchyłki dwustronnej — stary,
+jednostronny wskaźnik pokazywał 0,25 mm. Powierzchnia jako całość jest zdrowa
+(`SectionVolumeRatio` 0,985), ale pojedyncze profile lokalnie wychodzą poza
+materiał. To jest defekt zastany, tylko wcześniej niemierzalny.
 
 **Mediana osiowa ścina pojedyncze wypustki.** To ta sama operacja, która usuwa
 zygzak — nie da się mieć obu naraz. Zawieranie spadło z 1,1% do 7,5–9,1%

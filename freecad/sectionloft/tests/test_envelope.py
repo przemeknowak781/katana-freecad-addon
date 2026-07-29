@@ -194,10 +194,21 @@ class TestAxialField(unittest.TestCase):
 
 
 class TestEnvelopeProfile(unittest.TestCase):
+    def test_reports_the_centre_it_actually_used(self):
+        """Radii measured from one point and rebuilt around another inflate the
+        profile by the distance between them: sections reaching 15 mm on a mesh
+        that reaches 9.5, and a flat fin across the lofted surface."""
+        square = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=float)
+        _material, _hull, centre = ev.envelope_profile(
+            [square], centre=(100.0, 100.0), samples=36)
+        self.assertTrue(ev._point_in_polygon(centre, square),
+                        "an axis outside the section must be slid inside")
+
     def test_reports_gaps_as_nan_rather_than_deciding(self):
         arc = fx.circle(radius=10.0, n=80)[:40, :2]
-        material, hull = ev.envelope_profile([np.vstack([arc, arc[::-1] * 0.9])],
-                                             centre=(0.0, 0.0), samples=72)
+        material, hull, centre = ev.envelope_profile(
+            [np.vstack([arc, arc[::-1] * 0.9])], centre=(0.0, 0.0), samples=72)
+        self.assertEqual(len(centre), 2)
         self.assertEqual(len(material), 72)
         self.assertTrue(np.any(np.isnan(material)),
                         "angles with nothing to hit must come back as nan")
@@ -205,7 +216,8 @@ class TestEnvelopeProfile(unittest.TestCase):
 
     def test_a_full_circle_has_no_gaps(self):
         poly = fx.circle(radius=10.0, n=90)[:, :2]
-        material, _ = ev.envelope_profile([poly], centre=(0.0, 0.0), samples=72)
+        material, _hull, _centre = ev.envelope_profile([poly], centre=(0.0, 0.0),
+                                                       samples=72)
         self.assertFalse(np.any(np.isnan(material)))
         self.assertLess(abs(np.nanmean(material) - 10.0), 0.05)
 
