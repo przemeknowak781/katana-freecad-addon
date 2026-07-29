@@ -31,6 +31,12 @@ class FitParams:
     continuity: str = "C2"
     decimate: bool = True
     decimate_factor: float = 0.25
+    #: ``Approximate`` smooths through the points within ``tolerance``;
+    #: ``Interpolate`` passes through every one of them.  Approximation is what
+    #: a loft wants - few poles, gentle curvature - but it cannot promise
+    #: fidelity, only a bound.  Interpolation is the honest answer to "reproduce
+    #: the section", and it is what keeps a scanned corner a corner.
+    method: str = "Approximate"
     corner_detection: bool = True
     corner_angle: float = np.deg2rad(30.0)
     #: Exact number of pieces a contour must be split into; 0 means "however
@@ -129,6 +135,96 @@ def approximate_segment(points, params):
                       Tolerance=float(params.tolerance),
                       Continuity=str(params.continuity))
     return curve
+
+
+#: A run shorter than this is drawn as straight edges instead of a spline.  A
+#: spline through three or four points has enough freedom to bulge between them
+#: - measured at 2.08 mm on a 52-point contour that corner detection split into
+#: twelve pieces - while straight edges through the same points are exact.
+MIN_POINTS_FOR_SPLINE = 5
+
+
+def straight_edges(points):
+    return [Part.LineSegment(App.Vector(*a), App.Vector(*b)).toShape()
+            for a, b in zip(points[:-1], points[1:])]
+
+
+def interpolate_segment(points, closed=False, tolerance=0.0):
+    """Edges through every point: a periodic spline, a spline, or lines.
+
+    A spline is used unless it misrepresents its own segment.  Passing through
+    the points is not the same as staying near them: a short run gives the curve
+    enough freedom to bulge in between, measured at 2.08 mm on a contour that
+    corner detection had cut into twelve pieces.  So the result is checked
+    against the polyline it came from, and straight edges - which cannot bulge -
+    are used when the spline strays.
+
+    No decimation first.  Douglas-Peucker strips points out of the straight
+    stretches, and a spline interpolated through what is left bulges across
+    them: measured on a real section, a polyline sitting 0.020 mm from the
+    original produced a curve 0.819 mm away.  Thinning and interpolation pull in
+    opposite directions - thin for a *smooth* fit, keep every point for a
+    faithful one.
+    """
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    if len(pts) < 2:
+        raise ValueError("segment has fewer than 2 points")
+
+    if not closed and len(pts) < MIN_POINTS_FOR_SPLINE:
+        return straight_edges(pts)
+
+    curve = Part.BSplineCurve()
+    curve.interpolate(Points=to_vectors(pts), PeriodicFlag=bool(closed))
+    edges = [curve.toShape()]
+
+    if tolerance > 0.0:
+        strayed = pl.max_deviation(curve_samples(edges, density=24), pts,
+                                   closed=bool(closed))
+        if strayed > tolerance and not closed:
+            return straight_edges(pts)
+    return edges
+
+
+def fit_contour_exact(points, closed, params):
+    """A section curve that reproduces its polyline rather than smoothing it."""
+    result = FitResult(closed=bool(closed))
+    result.tolerance_used = float(params.tolerance)
+    try:
+        pts = ct.drop_duplicates(points, 1e-7)
+        if len(pts) < 2:
+            result.error = "contour collapsed to a single point"
+            return result
+        result.points = pts
+
+        corners = (pl.detect_corners(pts, params.corner_angle, closed)
+                   if params.corner_detection else [])
+        result.corners = corners
+
+        limit = float(params.tolerance)
+        if closed and not corners:
+            edges = interpolate_segment(pts, closed=True, tolerance=limit)
+        else:
+            segments = (pl.split_at_corners(pts, corners, closed) if corners
+                        else [pts])
+            edges = []
+            for segment in segments:
+                piece = ct.drop_duplicates(segment, 1e-9)
+                if len(piece) >= 2:
+                    edges.extend(interpolate_segment(piece, tolerance=limit))
+
+        if not edges:
+            result.error = "every segment collapsed"
+            return result
+
+        result.edges = edges
+        result.wire = Part.Wire(edges)
+        samples = curve_samples(edges, density=24)
+        result.deviation = two_sided_deviation(ct.as_points(points), samples,
+                                               closed=closed)
+    except Exception as exc:  # noqa: BLE001
+        result.wire = None
+        result.error = "%s: %s" % (type(exc).__name__, exc)
+    return result
 
 
 def approximate_closed(points, params):
@@ -283,6 +379,9 @@ def fit_contour(points, closed, params):
     less decimation and finally with none.  Never raises - a failure is reported
     through ``FitResult.error`` so one bad section cannot take down the rest.
     """
+    if str(params.method) == "Interpolate":
+        return fit_contour_exact(points, closed, params)
+
     best = None
     for attempt in decimation_backoff(params):
         result = _fit_once(points, closed, attempt)

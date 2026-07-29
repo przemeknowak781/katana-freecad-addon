@@ -49,6 +49,13 @@ class FittedSections:
         add_property(obj, "App::PropertyLink", "Source", GROUP_SOURCE,
                      "SectionSet, or any object whose Shape is a compound of "
                      "contour wires")
+        add_property(obj, "App::PropertyEnumeration", "Method", GROUP_FIT,
+                     "Approximate smooths through the section within Tolerance; "
+                     "Interpolate passes through every point of it. Use "
+                     "Interpolate when the section itself is the deliverable - "
+                     "it keeps corners, holes and small features exactly where "
+                     "the mesh put them",
+                     enum=["Approximate", "Interpolate"], default="Approximate")
         add_property(obj, "App::PropertyBool", "AutoTolerance", GROUP_FIT,
                      "Derive the tolerance from the density of the source mesh",
                      default=True)
@@ -267,6 +274,7 @@ class FittedSections:
     def fit_params(self, obj, tolerance):
         return FitParams(
             tolerance=tolerance,
+            method=str(obj.Method),
             degree_min=int(obj.DegreeMin),
             degree_max=int(obj.DegreeMax),
             continuity=str(obj.Continuity),

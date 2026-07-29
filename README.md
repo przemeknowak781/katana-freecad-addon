@@ -3,7 +3,7 @@
 Siatka wejściowa → rodzina przekrojów → dopasowane krzywe B-spline → loft, dla FreeCAD.
 
 **Status: v0.2.** Algorytm, trzy obiekty parametryczne, parowanie konturów między
-przekrojami, tryb obwiedni, kreator i workbench. 227 testów, wszystkie przechodzą
+przekrojami, tryb obwiedni, kreator i workbench. 233 testy, wszystkie przechodzą
 na FreeCAD 1.1.3. Sprawdzone na siatkach analitycznych i na prawdziwym skanie
 cienkościennej maski — ta ostatnia wymaga **trybu obwiedni**, w trybie konturów
 wychodzi bez sensu.
@@ -101,7 +101,7 @@ print(report.status)
 > (`robocopy ... /XF run_tests.py bench.py`) albo testuj z pustym
 > `FREECAD_USER_HOME`.
 
-227 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
+233 testy, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
 panel nie importuje `FreeCADGui`, więc daje się zbudować na offscreenowym Qt
 i wyklikać programowo. Moduły `planes`, `contours`, `polyline` i `pairing` są
 czystym numpy i uruchamiają się zwykłym interpreterem:
@@ -218,6 +218,41 @@ Bez wchodzenia w stan Pythona, który nie przeżywa zapisu dokumentu:
   `SectionLoft` wie, co z czym loftować, czytając jedną listę liczb.
 - `FittedSections` przyjmuje też zwykły compound wire'ów z dowolnego obiektu —
   wtedy każdy wire jest osobnym przekrojem.
+
+## Tryb wierny — przekrój 1:1
+
+`FittedSections.Method = Interpolate` przepuszcza krzywą przez **każdy** punkt
+przekroju, zamiast wygładzać w granicach tolerancji. To jest tryb do sytuacji,
+w której to przekrój jest produktem: zachowuje narożniki, otwory i drobne
+elementy dokładnie tam, gdzie umieściła je siatka.
+
+Zmierzone na `robomask_neat (1).stl`, 20 przekrojów, 35 konturów:
+
+| Miara | Aproksymacja | Interpolacja |
+|---|---|---|
+| Największa odchyłka | 0,545 mm | **0,209 mm** |
+| Mediana odchyłki | — | **0,056 mm** |
+
+Przy medianie krawędzi siatki 0,499 mm mediana 0,056 mm oznacza, że krzywa
+trzyma się przekroju dziesięciokrotnie ciaśniej niż wynosi rozdzielczość samej
+siatki.
+
+Trzy rzeczy, bez których to nie działało:
+
+**Nie decymować przed interpolacją.** Douglas-Peucker usuwa punkty z odcinków
+prostych, a splajn przez rzadko rozstawione punkty wybrzusza się między nimi:
+polilinia leżąca 0,020 mm od oryginału dała krzywą oddaloną o 0,819 mm.
+Decymacja i interpolacja ciągną w przeciwne strony — decymuj dla *gładkości*,
+zachowaj wszystkie punkty dla *wierności*.
+
+**Krótkie odcinki rysować prosto.** Splajn przez trzy czy cztery punkty ma dość
+swobody, żeby się między nimi wybrzuszyć — zmierzone 2,08 mm na konturze, który
+detekcja narożników pocięła na dwanaście kawałków.
+
+**Sprawdzać splajn względem własnego segmentu.** Przejście przez punkty to nie
+to samo co trzymanie się ich. Każdy splajn jest mierzony względem swojej
+polilinii i zastępowany odcinkami, gdy od niej odchodzi. To zbiło najgorszy
+przypadek z 2,077 do 0,209 mm.
 
 ## Tryb obwiedni — dla cienkościennych i podziurawionych
 

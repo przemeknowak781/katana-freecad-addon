@@ -4,8 +4,10 @@ import unittest
 
 import numpy as np
 
+import FreeCAD as App
 import Part
 
+from freecad.sectionloft.core import fitting as ft
 from freecad.sectionloft.core.fitting import FitParams, fit_contour
 from freecad.sectionloft.tests import fixtures as fx
 
@@ -86,6 +88,57 @@ class TestSeamRefinement(unittest.TestCase):
         fit = fit_contour(fx.circle(radius=50.0, n=200), True,
                           FitParams(tolerance=0.05))
         self.assertAlmostEqual(fit.tolerance_used, 0.05)
+
+
+class TestExactFitting(unittest.TestCase):
+    """Interpolate mode: the section itself is the deliverable."""
+
+    def params(self, **kwargs):
+        settings = dict(tolerance=0.2, method="Interpolate")
+        settings.update(kwargs)
+        return FitParams(**settings)
+
+    def test_passes_through_the_points(self):
+        points = fx.circle(radius=25.0, n=60)
+        fit = fit_contour(points, True, self.params())
+        self.assertTrue(fit.ok, fit.error)
+        for point in points:
+            self.assertLess(
+                Part.Vertex(App.Vector(*point)).distToShape(fit.wire)[0], 1e-6)
+
+    def test_a_closed_contour_comes_back_closed(self):
+        fit = fit_contour(fx.circle(radius=10.0, n=40), True, self.params())
+        self.assertTrue(fit.wire.isClosed())
+
+    def test_corners_are_kept(self):
+        fit = fit_contour(fx.rectangle(40, 30, 12), True, self.params())
+        self.assertTrue(fit.ok, fit.error)
+        self.assertEqual(len(fit.corners), 4)
+        self.assertLess(fit.deviation, 1e-6)
+
+    def test_a_short_run_is_drawn_straight(self):
+        """A spline through three or four points has room to bulge between
+        them; straight edges through the same points cannot."""
+        points = np.array([[0, 0, 0], [1, 0.02, 0], [2, 0, 0], [3, 0.02, 0]],
+                          dtype=float)
+        edges = ft.interpolate_segment(points, tolerance=0.001)
+        self.assertEqual(len(edges), 3)
+        for edge in edges:
+            self.assertIsInstance(edge.Curve, Part.Line)
+
+    def test_a_bulging_spline_falls_back_to_straight_edges(self):
+        points = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0],
+                           [4, 0, 0], [5, 3, 0]], dtype=float)
+        loose = ft.interpolate_segment(points, tolerance=10.0)
+        strict = ft.interpolate_segment(points, tolerance=1e-6)
+        self.assertEqual(len(loose), 1)
+        self.assertEqual(len(strict), len(points) - 1)
+
+    def test_beats_approximation_on_fidelity(self):
+        points = fx.rectangle(40, 30, 20)
+        exact = fit_contour(points, True, self.params())
+        smooth = fit_contour(points, True, FitParams(tolerance=0.2))
+        self.assertLess(exact.deviation, smooth.deviation + 1e-9)
 
 
 class TestFitCorners(unittest.TestCase):
