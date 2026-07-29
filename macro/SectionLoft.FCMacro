@@ -1,0 +1,130 @@
+# -*- coding: utf-8 -*-
+"""SectionLoft v0.1 - run the mesh -> sections -> fitted curves chain.
+
+Usage: select a Mesh object in the tree, then run this macro.
+
+Edit the parameter block below; v0.1 has no GUI on purpose (see the spec,
+section 10: the usual way a project like this dies is a beautiful wizard on top
+of an algorithm nobody validated).  Once the numbers here give curves worth
+lofting, they become the defaults of the parametric objects in v0.2.
+"""
+
+import os
+import sys
+
+import FreeCAD as App
+
+# --------------------------------------------------------------------------
+# Parameters
+# --------------------------------------------------------------------------
+DIRECTION = (0.0, 0.0, 1.0)     # normal of the cutting planes
+COUNT = 12                      # number of sections
+INSET = 0.02                    # keep the outermost planes off the silhouette
+AUTO_TOLERANCE = True           # derive the fit tolerance from the mesh density
+TOLERANCE_FACTOR = 0.5          # multiplier on the median mesh edge length
+TOLERANCE = 0.2                 # used only when AUTO_TOLERANCE is False
+CORNER_DETECTION = True
+CORNER_ANGLE_DEG = 30.0
+SEAM_AXIS = (1.0, 0.0, 0.0)
+BUILD_LOFT = True               # preview loft; the parametric one is v0.2
+
+
+def _ensure_importable():
+    """Make the package importable when the macro is run from a checkout.
+
+    Installed under ``Mod/`` this is a no-op - FreeCAD has already put the
+    ``freecad`` namespace package together.
+    """
+    try:
+        import freecad.sectionloft  # noqa: F401
+        return True
+    except ImportError:
+        pass
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    if os.path.isdir(os.path.join(root, "freecad", "sectionloft")):
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        if "freecad" in sys.modules:
+            pkg = os.path.join(root, "freecad")
+            if pkg not in list(sys.modules["freecad"].__path__):
+                sys.modules["freecad"].__path__.append(pkg)
+    try:
+        import freecad.sectionloft  # noqa: F401
+        return True
+    except ImportError:
+        App.Console.PrintError(
+            "[SectionLoft] package not importable; install it under Mod/ or "
+            "run the macro from the repository checkout\n")
+        return False
+
+
+def _selected_mesh():
+    try:
+        import FreeCADGui as Gui
+        selection = Gui.Selection.getSelection()
+    except ImportError:
+        selection = []
+    for obj in selection:
+        if obj.isDerivedFrom("Mesh::Feature"):
+            return obj
+    doc = App.ActiveDocument
+    meshes = [o for o in (doc.Objects if doc else [])
+              if o.isDerivedFrom("Mesh::Feature")]
+    if len(meshes) == 1:
+        return meshes[0]
+    return None
+
+
+def run():
+    if not _ensure_importable():
+        return None
+
+    import numpy as np
+    import Part
+    from freecad.sectionloft.core import pipeline as pp
+    from freecad.sectionloft.core.fitting import FitParams
+
+    doc = App.ActiveDocument
+    if doc is None:
+        App.Console.PrintError("[SectionLoft] no active document\n")
+        return None
+
+    mesh_obj = _selected_mesh()
+    if mesh_obj is None:
+        App.Console.PrintError(
+            "[SectionLoft] select exactly one Mesh object first\n")
+        return None
+
+    slice_params = pp.SliceParams(
+        direction=DIRECTION, count=COUNT, inset=INSET,
+        auto_tolerance=AUTO_TOLERANCE, tolerance_factor=TOLERANCE_FACTOR,
+        seam_axis=SEAM_AXIS)
+    fit_params = FitParams(
+        tolerance=TOLERANCE, corner_detection=CORNER_DETECTION,
+        corner_angle=np.deg2rad(CORNER_ANGLE_DEG))
+
+    report = pp.run(mesh_obj.Mesh, slice_params, fit_params)
+    objects = pp.add_to_document(doc, report, prefix=mesh_obj.Name + "_Section")
+
+    if BUILD_LOFT and len(report.fitted_shape.Wires) >= 2:
+        try:
+            loft = Part.makeLoft(report.fitted_shape.Wires, True, False, False)
+            obj = doc.addObject("Part::Feature", mesh_obj.Name + "_SectionLoft")
+            obj.Shape = loft
+            objects.append(obj)
+            App.Console.PrintMessage(
+                "[SectionLoft] loft volume %.1f mm3\n" % loft.Volume)
+        except Exception as exc:  # noqa: BLE001
+            App.Console.PrintWarning("[SectionLoft] loft failed: %s\n" % exc)
+
+    doc.recompute()
+    App.Console.PrintMessage("[SectionLoft] %s\n" % report.status)
+    if report.failed_sections:
+        App.Console.PrintWarning(
+            "[SectionLoft] failed sections: %s\n" % report.failed_sections)
+    return report
+
+
+report = run()
