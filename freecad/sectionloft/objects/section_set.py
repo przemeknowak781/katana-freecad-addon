@@ -76,6 +76,18 @@ class SectionSet:
         add_property(obj, "App::PropertyInteger", "EnvelopeSamples",
                      GROUP_FILTER,
                      "Number of rays used to trace the envelope", default=180)
+        add_property(obj, "App::PropertyFloat", "EnvelopeBridging",
+                     GROUP_FILTER,
+                     "How readily the envelope bridges instead of following a "
+                     "deep feature: a sample reaching less than this fraction "
+                     "of the convex hull is treated as a ray that escaped "
+                     "through an opening. 0 follows everything the axis can see",
+                     default=0.25)
+        add_property(obj, "App::PropertyBool", "ConvexEnvelope", GROUP_FILTER,
+                     "Bridge every concavity instead of following the ones the "
+                     "axis can see. Cruder, but conservative: on the test mesh "
+                     "the convex form sat a mean of 2.1 mm outside the material",
+                     default=False)
         add_property(obj, "App::PropertyLength", "Clearance", GROUP_FILTER,
                      "Push the envelope out by this much. A surface lofted "
                      "between planes cuts inside the part wherever it bulges "
@@ -136,6 +148,8 @@ class SectionSet:
             contour_mode=str(obj.ContourMode),
             envelope_samples=max(24, int(obj.EnvelopeSamples)),
             clearance=value(obj.Clearance),
+            envelope_convex=bool(obj.ConvexEnvelope),
+            envelope_collapse_factor=max(0.0, float(obj.EnvelopeBridging)),
             min_contour_length=value(obj.MinContourLength),
             close_tolerance=close_tolerance,
             # Orientation and seam belong to FittedSections: they are fitting

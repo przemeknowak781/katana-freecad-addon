@@ -209,6 +209,194 @@ def split_at_corners(points, corners, closed=False):
     return [s for s in segments if len(s) >= 2] or [pts]
 
 
+def common_corner_indices(profiles, angle_threshold, min_fraction=0.35,
+                          tolerance=2, separation=3):
+    """Corner positions shared by a family of equally-sampled profiles.
+
+    Envelope sections all carry the same number of points in the same angular
+    order, so a corner can be named by its sample index and compared across
+    sections.  That is what makes creases survivable: split every section at the
+    *same* indices and the loft joins edge to edge instead of running a smooth
+    surface past a sharp feature.
+
+    A corner drifts by a sample or two between neighbouring sections, so votes
+    are pooled over a small window, and only positions that a decent fraction of
+    the family agrees on are kept - one section's triangulation noise should not
+    put an edge into every other section.
+    """
+    profiles = [as_points(p) for p in profiles]
+    if not profiles:
+        return []
+    size = len(profiles[0])
+    if size < 8 or any(len(p) != size for p in profiles):
+        return []
+
+    # One vote per section per neighbourhood, not one per sharp vertex: a single
+    # bump in a profile turns sharply on the way in, at the tip and on the way
+    # out, and counting those separately let one section out-vote the threshold
+    # on its own.
+    pooled = np.zeros(size)
+    for points in profiles:
+        seen = np.zeros(size, dtype=bool)
+        for index in detect_corners(points, angle_threshold, closed=True):
+            for offset in range(-int(tolerance), int(tolerance) + 1):
+                seen[(index + offset) % size] = True
+        pooled += seen
+
+    needed = max(1.0, min_fraction * len(profiles))
+    flagged = pooled >= needed
+    if not np.any(flagged):
+        return []
+
+    # A corner in a radial profile registers on *both* sides of the peak - the
+    # polyline turns sharply going in and again coming out - so the raw hits
+    # straddle the feature rather than landing on it.  Neighbouring hits are
+    # therefore grouped and each group contributes one split, at its
+    # highest-voted index.
+    groups = []
+    current = []
+    for index in range(size):
+        if flagged[index]:
+            current.append(index)
+        elif current:
+            groups.append(current)
+            current = []
+    if current:
+        if groups and flagged[0] and (size - current[-1]) <= 1:
+            groups[0] = current + groups[0]      # the run wraps past zero
+        else:
+            groups.append(current)
+
+    chosen = []
+    for group in groups:
+        # Pooling makes the whole neighbourhood tie, so the middle of the tied
+        # run is the honest position - taking the first would put every split a
+        # sample early.
+        peak = max(pooled[i % size] for i in group)
+        tied = [i for i in group if pooled[i % size] >= peak - 1e-9]
+        best = tied[len(tied) // 2]
+        if all(min(abs(best - k), size - abs(best - k)) >= separation
+               for k in chosen):
+            chosen.append(best % size)
+    return sorted(chosen)
+
+
+def merge_adjacent(indices, size, separation=2):
+    """Collapse runs of neighbouring indices to one entry each.
+
+    A corner in a radial profile registers on both sides of the peak - the
+    polyline turns sharply going in and again coming out - so a single feature
+    arrives as two or three indices.  Left alone they seed two or three separate
+    creases at the same place.
+    """
+    marks = sorted({int(i) % int(size) for i in indices})
+    if len(marks) < 2:
+        return marks
+
+    groups = [[marks[0]]]
+    for index in marks[1:]:
+        if index - groups[-1][-1] <= separation:
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    # The first and last runs may be the same feature seen either side of zero.
+    if len(groups) > 1 and (size - groups[-1][-1] + groups[0][0]) <= separation:
+        groups[0] = groups.pop() + groups[0]
+    return sorted(group[len(group) // 2] % int(size) for group in groups)
+
+
+def track_corner_lines(profiles, angle_threshold, window=4, min_fraction=0.35):
+    """Follow creases along a family of equally-sampled profiles.
+
+    Returns one list of split indices per profile, all the same length, or an
+    empty list when nothing is worth splitting at.
+
+    A crease on a curved part does not sit at a fixed angle: it drifts by a
+    sample or two per section as the surface turns.  Pinning every section to
+    one index loses it - measured on the test mesh at 30 sections, the shared
+    index found two corners where the sections themselves turn through 178
+    degrees.  So each crease is tracked instead: found in one section, then
+    followed into its neighbours within ``window`` samples, and carried straight
+    through sections that do not see it rather than being abandoned.
+
+    A line that only a ``min_fraction`` of the family ever supports is dropped -
+    that is one section's triangulation noise, not a feature.
+    """
+    profiles = [as_points(p) for p in profiles]
+    if len(profiles) < 2:
+        return []
+    size = len(profiles[0])
+    if size < 8 or any(len(p) != size for p in profiles):
+        return []
+
+    detected = [merge_adjacent(detect_corners(p, angle_threshold, closed=True),
+                               size)
+                for p in profiles]
+    if not any(detected):
+        return []
+
+    anchor = max(range(len(profiles)), key=lambda i: len(detected[i]))
+    lines = [{"index": {anchor: i}, "support": 1} for i in detected[anchor]]
+    if not lines:
+        return []
+
+    def follow(order):
+        for previous, current in order:
+            taken = set()
+            for line in lines:
+                if previous not in line["index"]:
+                    continue
+                position = line["index"][previous]
+                options = [c for c in detected[current] if c not in taken
+                           and min(abs(c - position), size - abs(c - position))
+                           <= window]
+                if options:
+                    best = min(options,
+                               key=lambda c: min(abs(c - position),
+                                                 size - abs(c - position)))
+                    taken.add(best)
+                    line["index"][current] = best
+                    line["support"] += 1
+                else:
+                    line["index"][current] = position
+
+    follow([(i, i - 1) for i in range(anchor, 0, -1)])
+    follow([(i, i + 1) for i in range(anchor, len(profiles) - 1)])
+
+    needed = max(1.0, min_fraction * len(profiles))
+    lines = [line for line in lines if line["support"] >= needed]
+    if len(lines) < 2:
+        return []
+
+    lines.sort(key=lambda line: line["index"][anchor])
+    return [[line["index"][section] for line in lines]
+            for section in range(len(profiles))]
+
+
+def split_at_indices(points, indices, closed=True):
+    """Split a contour at explicit vertex indices, keeping full resolution.
+
+    Unlike :func:`split_at_corners` this takes the split positions as given,
+    which is what lets every section of a chain break at the same angles.
+    """
+    pts = as_points(points)
+    size = len(pts)
+    marks = sorted({int(i) % size for i in indices})
+    if len(marks) < 2 or size < 3:
+        return [pts]
+
+    segments = []
+    for k, start in enumerate(marks):
+        end = marks[(k + 1) % len(marks)]
+        if end > start:
+            segment = pts[start:end + 1]
+        else:
+            segment = np.vstack([pts[start:], pts[:end + 1]])
+        if len(segment) >= 2:
+            segments.append(segment)
+    return segments or [pts]
+
+
 def max_deviation(points, samples, closed=False):
     """Largest distance from ``points`` to the polyline through ``samples``.
 

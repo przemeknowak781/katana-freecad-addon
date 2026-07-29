@@ -58,6 +58,8 @@ class SliceParams:
     contour_mode: str = MODE_ALL
     envelope_samples: int = 180
     clearance: float = 0.0
+    envelope_convex: bool = False
+    envelope_collapse_factor: float = 0.5
 
     # Fitting tolerance derivation, kept here because it depends on the mesh.
     auto_tolerance: bool = True
@@ -179,10 +181,98 @@ def _is_degenerate(points, normal, base, length):
     return area < DEGENERACY_RATIO * length * length
 
 
+def _cut(mesh, planes, tolerance):
+    """crossSections for a list of ``(base, normal)`` pairs, as numpy arrays."""
+    fc_planes = [(App.Vector(*base), App.Vector(*normal))
+                 for base, normal in planes]
+    raw = mesh.crossSections(fc_planes, float(tolerance))
+    return [[np.array([[p.x, p.y, p.z] for p in polygon], dtype=float)
+             for polygon in per_plane] for per_plane in raw]
+
+
+def envelope_sections(mesh, params, planes, origin, direction):
+    """Sections whose contour is the outer boundary of a slab of the mesh.
+
+    The boundary is measured off the *cross-sections*, not off the vertices.
+    That was the thing holding precision back: a slab of this mesh holds a few
+    hundred vertices, so at 180 rays over 120 of the bins came up empty and the
+    profile was interpolated noise.  A cross-section is a continuous polyline -
+    every ray hits it, and the radius it reports is exact.
+
+    To cover what the part does *between* section planes, each section is
+    measured against three cuts: its own plane and the half-steps either side.
+    Cutting at half spacing means neighbouring sections share those extra cuts,
+    so the whole family costs one crossSections call over 2N+1 planes.
+    """
+    if len(planes) < 2:
+        sub_planes = list(planes)
+        groups = [[0]] * len(planes)
+    else:
+        offsets = [float(np.dot(base - planes[0][0], direction))
+                   for base, _ in planes]
+        step = float(np.median(np.diff(offsets))) / 2.0
+        sub_offsets = [offsets[0] - step]
+        for value_ in offsets:
+            sub_offsets.extend([value_, value_ + step])
+        sub_planes = [(planes[0][0] + t * direction, direction)
+                      for t in sub_offsets]
+        groups = [[2 * i, 2 * i + 1, 2 * i + 2] for i in range(len(planes))]
+
+    cuts = _cut(mesh, sub_planes, params.slice_tolerance)
+    u, v, _n = pf.orthonormal_frame(direction)
+
+    # First pass: project each slab's contours into the shared 2D frame and take
+    # their hull, so the axis can be chosen once for the whole family.
+    projected = []
+    hulls = []
+    for (base, _normal), members in zip(planes, groups):
+        polygons = []
+        for member in members:
+            if 0 <= member < len(cuts):
+                polygons.extend(ct.to_plane_coords(c, base, u, v)
+                                for c in cuts[member] if len(c) >= 3)
+        projected.append(polygons)
+        hulls.append(ev.convex_hull_2d(np.vstack(polygons))
+                     if polygons else None)
+
+    axis, misses = ev.shared_axis(hulls)
+    if misses:
+        _warn("%d of %d sections do not contain the shared axis and fall back "
+              "to their own centre; the loft may twist there"
+              % (misses, len(planes)))
+
+    sections = []
+    for index, ((base, normal), polygons) in enumerate(zip(planes, projected)):
+        section = Section(index=index, base=base, normal=normal)
+        if not polygons:
+            _warn("section %d: nothing to build an envelope from" % index)
+            sections.append(section)
+            continue
+
+        profile = ev.envelope_2d(
+            polygons, axis, samples=int(params.envelope_samples),
+            collapse_factor=float(params.envelope_collapse_factor),
+            clearance=float(params.clearance),
+            convex=bool(params.envelope_convex))
+        if profile is None or len(profile) < 3:
+            _warn("section %d: could not build an envelope" % index)
+            sections.append(section)
+            continue
+
+        outline = base + profile[:, 0:1] * u + profile[:, 1:2] * v
+        outline, _ = ct.unify_orientation(outline, normal, base)
+        section.contours = [Contour(outline, True, index, False)]
+        sections.append(section)
+    return sections
+
+
 def slice_mesh(mesh, params=None):
     """Cut the mesh and clean up the resulting polylines."""
     params = params or SliceParams()
     origin, direction, planes = build_planes(mesh, params)
+
+    if params.contour_mode == MODE_ENVELOPE:
+        return envelope_sections(mesh, params, planes, origin, direction)
 
     bb = mesh.BoundBox
     close_tol = (params.close_tolerance if params.close_tolerance is not None
@@ -190,25 +280,6 @@ def slice_mesh(mesh, params=None):
 
     fc_planes = [(App.Vector(*base), App.Vector(*normal)) for base, normal in planes]
     raw = mesh.crossSections(fc_planes, float(params.slice_tolerance))
-
-    vertices = axis_point = None
-    slab_half_width = 0.0
-    if params.contour_mode == MODE_ENVELOPE:
-        vertices = mesh_points(mesh)
-        # One axis for the whole family, so the radial profiles of neighbouring
-        # sections are measured from the same place.
-        axis_point = origin
-        # Half the plane spacing, so the slabs tile the part without overlapping
-        # more than they have to.
-        offsets = [float(np.dot(base - planes[0][0], direction))
-                   for base, _ in planes]
-        gaps = np.diff(offsets) if len(offsets) > 1 else np.array([0.0])
-        # A full spacing, not half.  Half-width slabs tile the part, but the
-        # loft interpolates between two neighbouring profiles, and a point
-        # sitting between them is only guaranteed to be contained if *both*
-        # profiles already cover its height.
-        slab_half_width = float(np.median(np.abs(gaps))) if len(gaps) else 0.0
-    direction = planes[0][1] if planes else np.array([0.0, 0.0, 1.0])
 
     sections = []
     previous_start = None
@@ -247,52 +318,8 @@ def slice_mesh(mesh, params=None):
                 previous_start = pts[0]
             section.contours.append(Contour(pts, closed, i, reversed_))
 
-        if params.contour_mode == MODE_ENVELOPE:
-            _replace_with_envelope(section, params, vertices, direction,
-                                   slab_half_width, axis_point)
         sections.append(section)
     return sections
-
-
-def _replace_with_envelope(section, params, vertices=None, direction=None,
-                           slab=0.0, axis_point=None):
-    """Collapse a section's contours to their outer boundary, in place.
-
-    Everything downstream gets simpler: one contour per plane means no pairing,
-    a radial profile cannot self-intersect, and every section carries the same
-    points in the same angular order, so the loft has nothing left to twist.
-
-    Given the mesh vertices, the envelope is taken over a slab around the plane
-    rather than the cut itself, so that features falling between planes are
-    contained rather than shaved off.
-    """
-    if not section.contours:
-        return
-
-    outline = None
-    if vertices is not None and slab > 0.0:
-        offsets = (vertices - section.base) @ direction
-        slab_points = vertices[np.abs(offsets) <= slab]
-        if len(slab_points) >= 8:
-            outline = ev.envelope_from_slab(
-                slab_points, section.base, section.normal,
-                samples=int(params.envelope_samples),
-                clearance=float(params.clearance),
-                axis_point=axis_point)
-
-    if outline is None:
-        outline = ev.envelope_contour(
-            [c.points for c in section.contours], section.base, section.normal,
-            samples=int(params.envelope_samples),
-            clearance=float(params.clearance))
-    if outline is None or len(outline) < 3:
-        _warn("section %d: could not build an envelope, keeping the contours"
-              % section.index)
-        return
-
-    outline, _ = ct.unify_orientation(outline, section.normal, section.base)
-    section.rejected += max(0, len(section.contours) - 1)
-    section.contours = [Contour(outline, True, section.index, False)]
 
 
 def sections_to_shape(sections, primary_only=False):

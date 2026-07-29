@@ -120,96 +120,80 @@ class TestConvexHull(unittest.TestCase):
         self.assertLessEqual(len(ev.convex_hull_2d(pts)), 3)
 
 
-class TestRadialMax(unittest.TestCase):
-    def test_takes_the_farthest_point_per_bin(self):
-        pts = np.array([[1, 0], [5, 0], [0, 3]], dtype=float)
-        radii = ev.radial_max(pts, (0.0, 0.0), samples=4)
-        self.assertAlmostEqual(radii[0], 5.0)
-        self.assertAlmostEqual(radii[1], 3.0)
+class TestConcavity(unittest.TestCase):
+    """The star profile follows what the axis can see; the convex one bridges."""
 
-    def test_empty_bins_come_back_as_nan_not_zero(self):
-        """np.maximum propagates nan, so accumulating into a nan-filled array
-        leaves every bin empty and the caller silently gets nothing."""
-        radii = ev.radial_max(np.array([[5.0, 0.0]]), (0.0, 0.0), samples=8)
-        self.assertAlmostEqual(radii[0], 5.0)
-        self.assertEqual(int(np.isnan(radii).sum()), 7)
+    @staticmethod
+    def notched_square():
+        pts = [(-10, -10), (10, -10), (10, 10), (1, 10), (1, 2), (-1, 2),
+               (-1, 10), (-10, 10)]
+        return np.array(pts, dtype=float)
 
+    def test_star_form_follows_the_notch(self):
+        result = ev.envelope_2d([self.notched_square()], centre=(0.0, -5.0),
+                                samples=180, collapse_factor=0.0)
+        top = result[np.abs(result[:, 0]) < 0.5]
+        self.assertTrue(len(top) > 0)
+        self.assertLess(top[:, 1].max(), 4.0,
+                        "the notch should not have been bridged")
 
-class TestDilate(unittest.TestCase):
-    def test_never_moves_a_radius_inwards(self):
-        radii = np.array([1.0, 5.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
-        out = ev.dilate_radii(radii, 3)
-        self.assertTrue(np.all(out >= radii))
-        self.assertAlmostEqual(out[0], 5.0)
-        self.assertAlmostEqual(out[2], 5.0)
+    def test_convex_form_bridges_the_notch(self):
+        result = ev.envelope_2d([self.notched_square()], centre=(0.0, -5.0),
+                                samples=180, convex=True)
+        top = result[np.abs(result[:, 0]) < 0.5]
+        self.assertGreater(top[:, 1].max(), 9.0)
 
-    def test_wraps_around(self):
-        radii = np.array([5.0, 1.0, 1.0, 1.0], dtype=float)
-        out = ev.dilate_radii(radii, 3)
-        self.assertAlmostEqual(out[-1], 5.0)
-
-
-class TestEnvelopeFromPoints(unittest.TestCase):
-    """The envelope of a point cloud is its convex hull, so containment is a
-    property of the construction rather than something measured afterwards."""
-
-    def test_contains_every_point(self):
-        rng = np.random.default_rng(5)
-        pts = rng.normal(0.0, 5.0, (300, 2))
-        # Sampling a polygon at fixed angles cuts the corners a little, so the
-        # guarantee is stated the way a user would use it: with a clearance.
-        profile = ev.envelope_from_points(pts, samples=180, clearance=0.2)
-        outside = [p for p in pts if not ev._point_in_polygon(p, profile)]
-        self.assertEqual(outside, [], "%d points escaped the envelope"
-                         % len(outside))
-
-    def test_a_square_stays_square(self):
-        pts = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=float)
-        profile = ev.envelope_from_points(pts, samples=360)
-        self.assertLess(abs(profile[:, 0].max() - 10.0), 0.05)
-        self.assertLess(abs(profile[:, 1].min() - 0.0), 0.05)
-
-    def test_clearance_pushes_outwards(self):
-        pts = fx.circle(radius=10.0, n=64)[:, :2]
-        plain = ev.envelope_from_points(pts, samples=72)
-        padded = ev.envelope_from_points(pts, samples=72, clearance=0.5)
-        centre = plain.mean(axis=0)
-        self.assertAlmostEqual(
-            np.linalg.norm(padded[0] - centre)
-            - np.linalg.norm(plain[0] - centre), 0.5, places=6)
-
-    def test_a_centre_outside_the_hull_is_replaced(self):
-        pts = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=float)
-        profile = ev.envelope_from_points(pts, centre=(100.0, 100.0),
-                                          samples=72)
-        self.assertIsNotNone(profile)
-        self.assertLess(profile[:, 0].max(), 11.0)
+    def test_bridging_threshold_decides(self):
+        deep = np.array([(-10, -10), (10, -10), (10, 10), (0.5, 10),
+                         (0.5, -8), (-0.5, -8), (-0.5, 10), (-10, 10)],
+                        dtype=float)
+        followed = ev.envelope_2d([deep], centre=(-5.0, 0.0), samples=180,
+                                  collapse_factor=0.0)
+        bridged = ev.envelope_2d([deep], centre=(-5.0, 0.0), samples=180,
+                                 collapse_factor=0.9)
+        self.assertGreater(_area(bridged), _area(followed))
 
 
-class TestEnvelopeFromSlab(unittest.TestCase):
-    def test_contains_points_above_and_below_the_plane(self):
-        """The slab is what stops a loft from shaving features that fall
-        between two section planes."""
-        ring_low = fx.circle(radius=12.0, n=40, z=-0.4)
-        ring_mid = fx.circle(radius=8.0, n=40, z=0.0)
-        points = np.vstack([ring_low, ring_mid])
-        profile = ev.envelope_from_slab(points, (0, 0, 0), (0, 0, 1),
-                                        samples=72)
-        radii = np.linalg.norm(profile[:, :2], axis=1)
-        self.assertGreater(radii.min(), 11.8)
-        np.testing.assert_allclose(profile[:, 2], 0.0, atol=1e-9)
+class TestSharedAxis(unittest.TestCase):
+    """Profiles only line up between sections if they share an origin, and the
+    origin has to be inside every one of them."""
 
-    def test_shared_axis_is_the_one_it_was_given(self):
-        """Profiles measured from a common axis stay comparable between
-        sections; letting each pick its own centroid makes the loft twist."""
-        offset = fx.circle(radius=6.0, n=64, z=0.0) + np.array([4.0, 0.0, 0.0])
-        profile = ev.envelope_from_slab(offset, (0, 0, 0), (0, 0, 1),
-                                        samples=180, axis_point=(0, 0, 0))
-        radii = np.linalg.norm(profile[:, :2], axis=1)
-        # Measured from the origin the circle reaches 10 on one side and 2 on
-        # the other; measured from its own centre it would be 6 all round.
-        self.assertLess(abs(radii.max() - 10.0), 0.1)
-        self.assertLess(abs(radii.min() - 2.0), 0.2)
+    def test_intersection_of_overlapping_hulls(self):
+        a = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=float)
+        b = a + np.array([4.0, 0.0])
+        region = ev.common_interior([a, b])
+        self.assertIsNotNone(region)
+        self.assertGreater(_area(region), 0.0)
+        self.assertLess(region[:, 0].min(), 4.5)
+        self.assertGreater(region[:, 0].min(), 3.5)
+
+    def test_disjoint_hulls_have_no_common_interior(self):
+        a = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=float)
+        b = a + np.array([50.0, 0.0])
+        self.assertIsNone(ev.common_interior([a, b]))
+
+    def test_axis_lands_inside_every_hull_when_it_can(self):
+        hulls = [np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=float),
+                 np.array([[2, 2], [12, 2], [12, 12], [2, 12]], dtype=float)]
+        axis, misses = ev.shared_axis(hulls)
+        self.assertEqual(misses, 0)
+        for hull in hulls:
+            self.assertTrue(ev._point_in_polygon(axis, hull))
+
+    def test_reports_the_sections_it_could_not_satisfy(self):
+        hulls = [np.array([[0, 0], [4, 0], [4, 4], [0, 4]], dtype=float),
+                 np.array([[50, 0], [54, 0], [54, 4], [50, 4]], dtype=float)]
+        axis, misses = ev.shared_axis(hulls)
+        self.assertIsNotNone(axis)
+        self.assertEqual(misses, 1)
+
+    def test_no_hulls(self):
+        self.assertEqual(ev.shared_axis([]), (None, 0))
+
+
+def _area(polygon):
+    x, y = polygon[:, 0], polygon[:, 1]
+    return abs(0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
 
 
 class TestRibbonDetection(unittest.TestCase):

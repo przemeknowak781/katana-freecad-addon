@@ -117,8 +117,9 @@ def smooth_radii(radii, window):
     return np.convolve(padded, kernel, mode="valid")
 
 
-def envelope_2d(polygons, centre=None, samples=DEFAULT_SAMPLES, smoothing=3,
-                collapse_factor=0.5, hull_fraction=0.3, clearance=0.0):
+def envelope_2d(polygons, centre=None, samples=DEFAULT_SAMPLES, smoothing=0,
+                collapse_factor=0.5, hull_fraction=0.3, clearance=0.0,
+                convex=False):
     """Outer boundary of 2D polygons as a fixed-resolution radial profile.
 
     Returns an ``(n, 2)`` array, or None when nothing was hit.  Angles that hit
@@ -144,7 +145,9 @@ def envelope_2d(polygons, centre=None, samples=DEFAULT_SAMPLES, smoothing=3,
     if len(hull) < 3:
         return None
     hull_starts, hull_ends = _segments([hull])
-    if centre is None:
+    # A centre outside the shape is not a centre: rays from it miss the material
+    # over a wide arc and the profile collapses to zero radius there.
+    if centre is None or not _point_in_polygon(centre, hull):
         centre = hull.mean(axis=0)
     centre = np.asarray(centre, dtype=float).reshape(2)
 
@@ -152,6 +155,8 @@ def envelope_2d(polygons, centre=None, samples=DEFAULT_SAMPLES, smoothing=3,
     radii = np.zeros(len(angles))
     hull_radii = np.zeros(len(angles))
     fallbacks = 0
+    if convex:
+        collapse_factor = 2.0        # force every sample onto the hull
     for i, angle in enumerate(angles):
         direction = np.array([np.cos(angle), np.sin(angle)])
         outer = _ray_hits(centre, direction, hull_starts, hull_ends)
@@ -194,6 +199,96 @@ def envelope_2d(polygons, centre=None, samples=DEFAULT_SAMPLES, smoothing=3,
                                      radii * np.sin(angles)))
 
 
+def clip_convex(polygon, clipper):
+    """Sutherland-Hodgman clip of a convex polygon by a convex clipper.
+
+    Both are counter-clockwise, so the interior of each clipper edge is its left
+    side.  Returns the intersection, possibly empty.
+    """
+    result = np.asarray(polygon, dtype=float).reshape(-1, 2)
+    clip = np.asarray(clipper, dtype=float).reshape(-1, 2)
+
+    for i in range(len(clip)):
+        if len(result) == 0:
+            return result
+        a = clip[i]
+        b = clip[(i + 1) % len(clip)]
+        edge = b - a
+
+        def side(point):
+            return edge[0] * (point[1] - a[1]) - edge[1] * (point[0] - a[0])
+
+        output = []
+        for k in range(len(result)):
+            current = result[k]
+            previous = result[k - 1]
+            sc, sp = side(current), side(previous)
+            if sc >= 0.0:
+                if sp < 0.0:
+                    t = sp / (sp - sc)
+                    output.append(previous + t * (current - previous))
+                output.append(current)
+            elif sp >= 0.0:
+                t = sp / (sp - sc)
+                output.append(previous + t * (current - previous))
+        result = np.array(output, dtype=float).reshape(-1, 2)
+    return result
+
+
+def common_interior(hulls):
+    """Intersection of every hull, or None when they share no interior."""
+    valid = [np.asarray(h, dtype=float).reshape(-1, 2) for h in hulls
+             if h is not None and len(h) >= 3]
+    if not valid:
+        return None
+    region = valid[0]
+    for hull in valid[1:]:
+        region = clip_convex(region, hull)
+        if len(region) < 3:
+            return None
+    return region
+
+
+def shared_axis(hulls):
+    """A 2D point inside as many of the given hulls as possible.
+
+    Radial profiles only line up between sections if they are measured from the
+    same place, so the axis has to be chosen once for the whole family.  But it
+    also has to be *inside* each section, and the obvious candidate - the centre
+    of the mesh bounding box - is not: on the test mesh it fell outside the hull
+    of a section near the top, rays from it missed the material over a 200 degree
+    arc, and the profile collapsed to zero radius there.
+
+    Returns ``(axis, misses)``: the chosen point and how many hulls still do not
+    contain it.  Sections in that list have to fall back to their own centroid,
+    which is worth reporting because it is where a twist can creep back in.
+    """
+    valid = [np.asarray(h, dtype=float).reshape(-1, 2) for h in hulls
+             if h is not None and len(h) >= 3]
+    if not valid:
+        return None, 0
+
+    # Every section's hull is convex, so their intersection is too, and any
+    # point in it is inside all of them.  When it is non-empty this is exact -
+    # no section has to fall back to a centre of its own.
+    region = common_interior(valid)
+    if region is not None and len(region) >= 3:
+        return region.mean(axis=0), 0
+
+    centroids = [h.mean(axis=0) for h in valid]
+    candidates = [np.mean(centroids, axis=0)] + centroids
+
+    best = None
+    best_hits = -1
+    for candidate in candidates:
+        hits = sum(1 for hull in valid if _point_in_polygon(candidate, hull))
+        if hits > best_hits:
+            best, best_hits = candidate, hits
+        if hits == len(valid):
+            break
+    return best, len(valid) - best_hits
+
+
 def _point_in_polygon(point, polygon):
     """Ray casting; the polygon is assumed closed and simple."""
     x, y = float(point[0]), float(point[1])
@@ -209,134 +304,9 @@ def _point_in_polygon(point, polygon):
     return inside
 
 
-def radial_max(points_2d, centre, samples=DEFAULT_SAMPLES):
-    """Largest radius per angular bin over a point cloud.
-
-    Returns radii with ``nan`` in bins nothing landed in.
-
-    Casting rays at the section polyline only sees the plane it was cut on, and
-    a loft between two such planes shaves off whatever the part does in between:
-    on the test mesh, with sections 0.96 mm apart, thin tabs poked 0.6 mm
-    through their own envelope.  Taking the maximum over every vertex in a slab
-    around the plane makes containment a property of the construction instead of
-    something to be measured afterwards and apologised for.
-    """
-    pts = np.asarray(points_2d, dtype=float).reshape(-1, 2) - np.asarray(
-        centre, dtype=float).reshape(2)
-    if len(pts) == 0:
-        return np.full(int(samples), np.nan)
-
-    radii = np.linalg.norm(pts, axis=1)
-    angles = np.arctan2(pts[:, 1], pts[:, 0]) % (2.0 * np.pi)
-    bins = np.minimum((angles / (2.0 * np.pi) * samples).astype(int),
-                      int(samples) - 1)
-
-    # Accumulate into -inf, not nan: np.maximum propagates nan, so seeding with
-    # nan leaves every bin empty and the whole thing silently returns nothing.
-    out = np.full(int(samples), -np.inf)
-    np.maximum.at(out, bins, radii)
-    out[np.isneginf(out)] = np.nan
-    return out
-
-
-def dilate_radii(radii, window=3):
-    """Rolling maximum around the circle.
-
-    Binning a point cloud by angle leaves the profile as jagged as the sampling;
-    a rolling maximum widens each bin's influence to its neighbours, which both
-    smooths the steps and can only ever move the boundary outwards.  Averaging
-    alone would cut back inside the part, which is the one direction an envelope
-    must not go.
-    """
-    window = int(window)
-    if window < 3 or len(radii) < window:
-        return radii
-    if window % 2 == 0:
-        window += 1
-    half = window // 2
-    stacked = np.vstack([np.roll(radii, k) for k in range(-half, half + 1)])
-    return stacked.max(axis=0)
-
-
-def envelope_from_points(points_2d, centre=None, samples=DEFAULT_SAMPLES,
-                         smoothing=0, clearance=0.0, dilation=0):
-    """Envelope of a point cloud: its convex hull, sampled radially.
-
-    The hull is the one definition that makes containment a theorem rather than
-    a measurement.  Every point is inside it by construction, it is simple, and
-    because it is convex it is star-shaped about any interior point - so it can
-    be resampled at fixed angles from a shared centre without the profile
-    folding.  Sampling loses at most ``r * (1 - cos(pi / samples))``, which at
-    the default 180 rays is a few microns.
-
-    What it gives up is concavity: a waisted part comes back barrelled.  That is
-    the deliberate trade.  Everything softer that was tried here - farthest ray
-    hit, per-bin maxima, hull-only-when-sparse - produced sections that
-    contradicted their neighbours, and the lofts folded into shards.  Use
-    ContourMode All when the sections themselves are what matters.
-    """
-    pts = np.asarray(points_2d, dtype=float).reshape(-1, 2)
-    if len(pts) < 3:
-        return None
-    hull = convex_hull_2d(pts)
-    if len(hull) < 3:
-        return None
-
-    hull_starts, hull_ends = _segments([hull])
-    interior = hull.mean(axis=0)
-    if centre is None or not _point_in_polygon(centre, hull):
-        centre = interior
-    centre = np.asarray(centre, dtype=float).reshape(2)
-
-    angles = np.linspace(0.0, 2.0 * np.pi, int(samples), endpoint=False)
-    radii = np.zeros(len(angles))
-    for i, angle in enumerate(angles):
-        direction = np.array([np.cos(angle), np.sin(angle)])
-        distance = _ray_hits(centre, direction, hull_starts, hull_ends)
-        radii[i] = 0.0 if distance is None else distance
-    if not np.any(radii > 0.0):
-        return None
-
-    if dilation:
-        radii = dilate_radii(radii, dilation)
-    if smoothing:
-        radii = smooth_radii(radii, smoothing)
-    if clearance:
-        radii = radii + float(clearance)
-
-    angles = np.linspace(0.0, 2.0 * np.pi, int(samples), endpoint=False)
-    return centre + np.column_stack((radii * np.cos(angles),
-                                     radii * np.sin(angles)))
-
-
-def envelope_from_slab(points_3d, base, normal, samples=DEFAULT_SAMPLES,
-                       smoothing=3, clearance=0.0, axis_point=None):
-    """Envelope of 3D points projected onto a plane, back in 3D.
-
-    ``axis_point`` gives every section the same centre.  Letting each section
-    pick its own - the centroid of whatever it happens to contain - makes the
-    centre wander from plane to plane, and since the profiles are radial about
-    it, the loft twists between them.  Measured: a wandering centre dropped the
-    surface to 82% of the volume its own sections implied.
-    """
-    u, v, _ = orthonormal_frame(normal)
-    base = np.asarray(base, dtype=float).reshape(3)
-    projected = to_plane_coords(as_points(points_3d), base, u, v)
-
-    centre = None
-    if axis_point is not None:
-        centre = to_plane_coords(np.asarray(axis_point, dtype=float).reshape(1, 3),
-                                 base, u, v)[0]
-
-    profile = envelope_from_points(projected, centre, samples, smoothing,
-                                   clearance)
-    if profile is None:
-        return None
-    return base + profile[:, 0:1] * u + profile[:, 1:2] * v
-
-
 def envelope_contour(contours, base, normal, samples=DEFAULT_SAMPLES,
-                     centre=None, smoothing=3, clearance=0.0):
+                     centre=None, smoothing=0, clearance=0.0, convex=False,
+                     collapse_factor=0.5):
     """Envelope of 3D section contours, back in 3D.
 
     ``contours`` is a list of ``(n, 3)`` arrays lying in the plane given by
@@ -354,7 +324,8 @@ def envelope_contour(contours, base, normal, samples=DEFAULT_SAMPLES,
         centre = to_plane_coords(np.asarray(centre).reshape(1, 3), base, u, v)[0]
 
     profile = envelope_2d(polygons, centre, samples, smoothing,
-                          clearance=clearance)
+                          collapse_factor=collapse_factor, clearance=clearance,
+                          convex=convex)
     if profile is None:
         return None
     return base + profile[:, 0:1] * u + profile[:, 1:2] * v

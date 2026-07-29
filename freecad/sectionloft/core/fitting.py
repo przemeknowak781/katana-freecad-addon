@@ -257,14 +257,8 @@ def fit_contour(points, closed, params):
     less decimation and finally with none.  Never raises - a failure is reported
     through ``FitResult.error`` so one bad section cannot take down the rest.
     """
-    attempts = [params]
-    if params.decimate and params.decimate_factor > 0.0:
-        attempts.append(replace(params,
-                                decimate_factor=params.decimate_factor / 4.0))
-        attempts.append(replace(params, decimate=False))
-
     best = None
-    for attempt in attempts:
+    for attempt in decimation_backoff(params):
         result = _fit_once(points, closed, attempt)
         if best is None or (result.ok and not best.ok) or (
                 result.ok and best.ok and result.deviation < best.deviation):
@@ -272,6 +266,76 @@ def fit_contour(points, closed, params):
         if result.ok and result.deviation <= attempt.tolerance:
             return result
     return best
+
+
+def decimation_backoff(params):
+    """The decimation settings to try, in order, until the tolerance holds.
+
+    A spline through sparse points overshoots between them, so meeting the
+    tolerance against the decimated polyline says nothing about the original.
+    Every fitting path needs this ladder, not just the main one.
+    """
+    attempts = [params]
+    if params.decimate and params.decimate_factor > 0.0:
+        attempts.append(replace(params,
+                                decimate_factor=params.decimate_factor / 4.0))
+        attempts.append(replace(params, decimate=False))
+    return attempts
+
+
+def fit_contour_at(points, params, split_indices):
+    """Fit a closed contour split at explicit vertex indices.
+
+    Each piece is decimated and approximated on its own, so the corners stay
+    exactly where they were asked for.  Used for envelope sections, where the
+    split positions have to agree across the whole chain or the loft runs a
+    smooth surface straight past a crease.
+    """
+    best = None
+    for attempt in decimation_backoff(params):
+        result = _fit_at_once(points, attempt, split_indices)
+        if best is None or (result.ok and not best.ok) or (
+                result.ok and best.ok and result.deviation < best.deviation):
+            best = result
+        if result.ok and result.deviation <= attempt.tolerance:
+            return result
+    return best
+
+
+def _fit_at_once(points, params, split_indices):
+    result = FitResult(closed=True)
+    result.tolerance_used = float(params.tolerance)
+    try:
+        segments = pl.split_at_indices(points, split_indices, closed=True)
+        result.corners = sorted({int(i) for i in split_indices})
+
+        edges = []
+        kept = []
+        for segment in segments:
+            piece = ct.drop_duplicates(segment, max(1e-7, params.tolerance * 1e-3))
+            if params.decimate and len(piece) > 2:
+                piece = pl.douglas_peucker(
+                    piece, params.tolerance * params.decimate_factor)
+            if len(piece) < 2:
+                continue
+            kept.append(piece)
+            edges.append(approximate_segment(piece, params).toShape())
+
+        if not edges:
+            result.error = "every segment collapsed"
+            return result
+
+        result.points = np.vstack(kept)
+        result.edges = edges
+        result.wire = Part.Wire(edges)
+        samples = curve_samples(edges, density=max(16, 4 * len(points)
+                                                   // max(1, len(edges))))
+        result.deviation = pl.max_deviation(ct.as_points(points), samples,
+                                            closed=True)
+    except Exception as exc:  # noqa: BLE001
+        result.wire = None
+        result.error = "%s: %s" % (type(exc).__name__, exc)
+    return result
 
 
 def _fit_once(points, closed, params):

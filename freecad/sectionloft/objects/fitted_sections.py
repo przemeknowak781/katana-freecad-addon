@@ -15,7 +15,7 @@ from ..core import pairing as pr
 from ..core import polyline as pl
 from dataclasses import replace
 
-from ..core.fitting import FitParams, fit_contour
+from ..core.fitting import FitParams, fit_contour, fit_contour_at
 from .common import (ViewProviderBase, add_property, log, value, vector, warn,
                      wire_points)
 
@@ -86,6 +86,16 @@ class FittedSections:
                      "joined", default=True)
         add_property(obj, "App::PropertyAngle", "CornerAngle", GROUP_SHAPE,
                      "Turn angle counted as a corner", default=30.0)
+        add_property(obj, "App::PropertyInteger", "CornerDrift", GROUP_SHAPE,
+                     "How many samples a crease may move between neighbouring "
+                     "envelope sections and still count as the same crease. A "
+                     "feature on a curved surface does not sit at a fixed angle",
+                     default=4)
+        add_property(obj, "App::PropertyFloat", "CornerAgreement", GROUP_SHAPE,
+                     "For envelope sections: the fraction of the chain that "
+                     "must see a corner at the same angle before an edge is put "
+                     "there. Low values let one section's noise crease the whole "
+                     "surface", default=0.35)
         add_property(obj, "App::PropertyBool", "SeamSmoothing", GROUP_SEAM,
                      "Fit closed contours through cyclically extended data so "
                      "the seam is tangent-continuous instead of a crease",
@@ -209,18 +219,44 @@ class FittedSections:
         return float(np.clip(obj.ToleranceFactor * median, *TOLERANCE_LIMITS))
 
     @staticmethod
-    def corners_wanted(obj):
-        """Corner splitting, unless the source is producing envelopes.
+    def envelope_source(obj):
+        return str(getattr(getattr(obj, "Source", None), "ContourMode",
+                           "All")) == "Envelope"
 
-        An envelope is a radial profile: smooth by construction, and its corners
-        - where they exist at all - sit at whatever angle the sampling happened
-        to catch them.  They do not correspond between sections, so splitting
-        there gives the loft a set of edges that do not line up.  Measured on the
-        test mesh at 30 sections: the surface came out enclosing 36 times the
-        volume its own sections implied.  Use ContourMode All to keep corners.
+    @staticmethod
+    def corners_wanted(obj):
+        """Per-contour corner splitting, for ordinary contours.
+
+        Envelope sections take the other route: their corners are found once for
+        the whole chain and applied at the same sample indices everywhere, which
+        is the only way a crease survives into the loft.  Splitting each envelope
+        section on its own put edges wherever the sampling caught them; measured
+        on the test mesh at 30 sections, the surface came out enclosing 36 times
+        the volume its own sections implied.
         """
         mode = str(getattr(getattr(obj, "Source", None), "ContourMode", "All"))
         return bool(obj.CornerDetection) and mode != "Envelope"
+
+    def fit_envelope_chain(self, obj, prepared, params):
+        """Fit a chain of envelope sections, splitting them at tracked creases.
+
+        Every section gets the same *number* of splits, at its own angle for
+        each crease, so the loft joins edge to edge along a feature that drifts
+        as the surface turns.
+        """
+        profiles = [entry[2] for entry in prepared]
+        per_section = []
+        if bool(obj.CornerDetection):
+            per_section = pl.track_corner_lines(
+                profiles, np.deg2rad(value(obj.CornerAngle)),
+                window=max(1, int(obj.CornerDrift)),
+                min_fraction=float(obj.CornerAgreement))
+        if not per_section:
+            return [(entry, fit_contour(entry[2], entry[3], params))
+                    for entry in prepared], 0
+        return ([(entry, fit_contour_at(entry[2], params, indices))
+                 for entry, indices in zip(prepared, per_section)],
+                len(per_section[0]))
 
     def fit_params(self, obj, tolerance):
         return FitParams(
@@ -310,6 +346,7 @@ class FittedSections:
             kink = 0.0
 
             unified = 0
+            shared_corners = 0
             for chain in chains:
                 prepared = []
                 previous_start = None
@@ -321,8 +358,13 @@ class FittedSections:
                         previous_start = points[0]
                     prepared.append((section_index, contour_index, points, closed))
 
-                results = [(entry, fit_contour(entry[2], entry[3], params))
-                           for entry in prepared]
+                if self.envelope_source(obj):
+                    results, corners = self.fit_envelope_chain(obj, prepared,
+                                                               params)
+                    shared_corners = max(shared_corners, corners)
+                else:
+                    results = [(entry, fit_contour(entry[2], entry[3], params))
+                               for entry in prepared]
 
                 target = (self.common_corner_count(obj, results)
                           if params.corner_detection else None)
@@ -367,8 +409,10 @@ class FittedSections:
             obj.Status += ", %d chains" % len(obj.ChainSizes)
         if unified:
             obj.Status += ", %d chains refitted for uniform corners" % unified
-        if obj.CornerDetection and not self.corners_wanted(obj):
-            obj.Status += ", corners off (envelope sections)"
+        if shared_corners:
+            obj.Status += ", %d shared corners" % shared_corners
+        elif obj.CornerDetection and self.envelope_source(obj):
+            obj.Status += ", no corner agreed across the chain"
         if obj.AmbiguousSections:
             obj.Status += ", %d ambiguous" % len(obj.AmbiguousSections)
 

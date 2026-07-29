@@ -3,7 +3,7 @@
 Siatka wejściowa → rodzina przekrojów → dopasowane krzywe B-spline → loft, dla FreeCAD.
 
 **Status: v0.2.** Algorytm, trzy obiekty parametryczne, parowanie konturów między
-przekrojami, tryb obwiedni, kreator i workbench. 205 testów, wszystkie przechodzą
+przekrojami, tryb obwiedni, kreator i workbench. 217 testów, wszystkie przechodzą
 na FreeCAD 1.1.3. Sprawdzone na siatkach analitycznych i na prawdziwym skanie
 cienkościennej maski — ta ostatnia wymaga **trybu obwiedni**, w trybie konturów
 wychodzi bez sensu.
@@ -101,7 +101,7 @@ print(report.status)
 > (`robocopy ... /XF run_tests.py bench.py`) albo testuj z pustym
 > `FREECAD_USER_HOME`.
 
-205 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
+217 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
 panel nie importuje `FreeCADGui`, więc daje się zbudować na offscreenowym Qt
 i wyklikać programowo. Moduły `planes`, `contours`, `polyline` i `pairing` są
 czystym numpy i uruchamiają się zwykłym interpreterem:
@@ -226,9 +226,9 @@ obrysem. W kreatorze to checkbox „Obwiednia zamiast konturów", który ustawia
 powierzchnię prostokreślną i niewielkie odsunięcie skrajnych płaszczyzn, bo bez
 tego obwiednia nie obejmuje części.
 
-Definicja jest celowo twarda: **obwiednia przekroju to otoczka wypukła punktów
-siatki w plastrze wokół płaszczyzny**, próbkowana promieniowo ze wspólnej osi.
-Dzięki temu:
+Obwiednia przekroju to **profil promieniowy mierzony ze wspólnej osi**: dla
+każdego z 180 kątów najdalsze trafienie promienia w przekroje siatki. Dzięki
+temu:
 
 - zawieranie części wynika z definicji, a nie z pomiaru po fakcie,
 - profil nie może się samoprzeciąć,
@@ -236,31 +236,61 @@ Dzięki temu:
   nie ma czym skręcić,
 - na przekrój przypada jeden kontur, więc nie ma czego parować.
 
-Cena: wklęsłości są mostkowane — część z przewężeniem wraca beczkowata. Wszystko
-łagodniejsze, co próbowałem (najdalsze trafienie promienia, maksima w koszykach
-kątowych, otoczka tylko przy rzadkim materiale), dawało przekroje sprzeczne
-z sąsiadami i lofty rozpadające się na odłamki.
+Cena: odtwarzane są tylko wklęsłości widoczne z osi. Wnęka schowana za innym
+fragmentem ścianki zostaje zmostkowana, tak samo jak otwarta strona przekroju
+w kształcie litery C — i tak ma być, bo obwiednia ma część **zawierać**, a nie
+wchodzić w jej szczeliny.
 
-Plaster ma szerokość **pełnego** rozstawu płaszczyzn, nie połowy: loft
-interpoluje między dwoma sąsiednimi profilami, więc punkt między nimi jest
-objęty tylko wtedy, gdy oba profile pokrywają jego wysokość.
+### Cztery rzeczy, które decydują o precyzji
+
+**1. Brzeg mierzony z przekrojów, nie z wierzchołków.** Pierwsza wersja
+próbkowała chmurę wierzchołków siatki w plastrze. Plaster tej siatki ma 220–486
+wierzchołków, a profil 180 koszyków kątowych — **123 do 158 koszyków wychodziło
+pustych** i profil był interpolowanym szumem. Przekrój jest krzywą ciągłą: każdy
+promień w coś trafia, a odczyt jest dokładny.
+
+**2. Oś wspólna, ale leżąca wewnątrz każdego przekroju.** Środek bbox nie
+nadaje się: na tej siatce wypadł poza otoczką przekroju przy górze, promienie
+z niego mijały materiał na łuku 200°, a profil zapadał się tam do zera. Oś jest
+teraz liczona jako środek **przecięcia otoczek wszystkich przekrojów** (obcinanie
+Sutherland-Hodgman); gdy przecięcie jest puste, wybierany jest punkt zawarty
+w największej liczbie przekrojów, a reszta dostaje ostrzeżenie.
+
+**3. Załamania śledzone jako linie, nie jako stałe kąty.** Załamanie na
+zakrzywionej części wędruje kątowo między przekrojami. Przypięcie wszystkich
+przekrojów do jednego indeksu gubiło je (2 krawędzie, zwrot 133°). Każde
+załamanie jest teraz znajdowane w jednym przekroju i śledzone do sąsiadów
+w oknie `CornerDrift` próbek, a przekroje, które go nie widzą, przenoszą je
+prosto dalej. Linia, którą popiera mniej niż `CornerAgreement` rodziny, jest
+odrzucana jako szum triangulacji jednego przekroju.
+
+**4. Plaster o szerokości pełnego rozstawu.** Loft interpoluje między dwoma
+sąsiednimi profilami, więc punkt między nimi jest objęty tylko wtedy, gdy oba
+profile pokrywają jego wysokość.
 
 ### Wynik na `robomask_neat (1).stl`
 
-20 przekrojów wzdłuż Z, obwiednia, `Inset = 1%`, `Clearance = 0,3 mm`,
-powierzchnia prostokreślna:
+30 przekrojów wzdłuż Z, obwiednia, `Inset = 1%`, `Clearance = 0,5 mm`,
+powierzchnia prostokreślna. Kolumna „otoczka" to poprzednia wersja obwiedni,
+liczona jako otoczka wypukła bez śledzenia załamań:
 
-| Miara | Wartość |
-|---|---|
-| Bryła | 1 zamknięta, `isValid() == True` |
-| Objętość | 2110 mm³ |
-| `SectionVolumeRatio` | 1,033 |
-| Wierzchołki siatki poza obwiednią | **2 z 265 (0,8%)**, z tego 1 promieniowo |
-| Pokrycie w osi | z 0,18 do 18,00 przy części 0–18,18 |
-| Czas | ok. 2 s |
+| Miara | Otoczka wypukła | Teraz |
+|---|---|---|
+| Najostrzejszy zwrot w krzywej | 55° | **174°** (przekrój ma 178°) |
+| Szczelina do materiału, średnio | 2,111 mm | **1,571 mm** |
+| Wierzchołki poza obwiednią | 0,8% | 1,1% |
+| `SectionVolumeRatio` | 1,033 | 0,956 |
+| Odchyłka dopasowania | 0,246 mm | 0,248 mm (tolerancja 0,249) |
+| Czas | 2 s | 4,5 s |
 
-Dla porównania, ten sam plik w trybie `All`: gwiazda płaskich odłamków,
-objętość 66 894 mm³ przy 270 mm³ siatki.
+Bryła jest w obu przypadkach jedna, zamknięta i `isValid()`. Dla porównania ten
+sam plik w trybie `All`: gwiazda płaskich odłamków, 66 894 mm³ przy 270 mm³
+siatki.
+
+Zwrot 174° zamiast 55° oznacza, że narożniki i nagłe zmiany geometrii trafiają
+do wyniku jako krawędzie, a nie jako zaokrąglenia — to była główna rzecz do
+poprawienia i widać ją na renderze jako płaską fasetkę na górze i wcięcie
+z boku.
 
 **Powierzchnia prostokreślna nie jest tu kosmetyką.** Gładki loft podcina się
 między płaszczyznami; prostokreślny interpoluje liniowo, więc jeśli oba sąsiednie
@@ -343,7 +373,12 @@ prostopadłościan wychodzą w granicach 0,12% objętości analitycznej.
   W trybie `All` dają wynik bez sensu. Sprawdzaj `SectionVolumeRatio`; jeśli
   odbiega od 1,0, powierzchnia zawija się sama na siebie niezależnie od tego, co
   mówią pozostałe liczby.
-- Obwiednia mostkuje wklęsłości — część z przewężeniem wraca beczkowata.
+- Obwiednia odtwarza tylko wklęsłości widoczne z osi; wnęka schowana za innym
+  fragmentem ścianki zostaje zmostkowana. `ConvexEnvelope = True` mostkuje
+  wszystkie, jeśli potrzebny jest wariant zachowawczy.
+- Mediana ostrych zwrotów nadal odstaje (79° wobec 161° w przekrojach): śledzone
+  są załamania biegnące przez znaczną część wysokości, a nie takie, które
+  pojawiają się w kilku przekrojach.
 - Obwiednia nie sięga ostatnich ułamków milimetra na końcach zakresu, bo skrajne
   płaszczyzny muszą być odsunięte od sylwetki. Przy `Inset = 1%` to 1% wysokości.
 

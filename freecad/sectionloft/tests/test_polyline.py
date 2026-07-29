@@ -144,6 +144,125 @@ class TestUniformSplits(unittest.TestCase):
         np.testing.assert_allclose(padded, pts)
 
 
+class TestSharedCorners(unittest.TestCase):
+    """Envelope sections are sampled at the same angles, so a corner can be
+    named by its index and agreed on across the whole chain."""
+
+    @staticmethod
+    def profile(radius, corner_at=None, n=72, bump=1.6):
+        angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        radii = np.full(n, float(radius))
+        if corner_at is not None:
+            radii[corner_at] *= bump
+        return np.column_stack((radii * np.cos(angles), radii * np.sin(angles),
+                                np.zeros(n)))
+
+    def test_a_corner_every_section_agrees_on_is_kept(self):
+        profiles = [self.profile(10.0 + i * 0.2, corner_at=18)
+                    for i in range(6)]
+        indices = pl.common_corner_indices(profiles, np.deg2rad(30.0))
+        self.assertIn(18, indices)
+
+    def test_one_section_alone_does_not_crease_the_chain(self):
+        profiles = [self.profile(10.0) for _ in range(6)]
+        profiles[2] = self.profile(10.0, corner_at=40)
+        indices = pl.common_corner_indices(profiles, np.deg2rad(30.0),
+                                           min_fraction=0.5)
+        self.assertNotIn(40, indices)
+
+    def test_a_corner_drifting_by_a_sample_still_counts(self):
+        profiles = [self.profile(10.0, corner_at=18 + (i % 2))
+                    for i in range(6)]
+        indices = pl.common_corner_indices(profiles, np.deg2rad(30.0))
+        self.assertTrue(any(abs(i - 18) <= 2 for i in indices))
+
+    def test_broad_peaks_yield_one_corner_not_five(self):
+        profiles = [self.profile(10.0, corner_at=18) for _ in range(6)]
+        indices = pl.common_corner_indices(profiles, np.deg2rad(20.0))
+        close = [i for i in indices if min(abs(i - 18), 72 - abs(i - 18)) <= 3]
+        self.assertLessEqual(len(close), 1)
+
+    def test_mismatched_lengths_are_refused(self):
+        self.assertEqual(
+            pl.common_corner_indices([self.profile(10.0, n=72),
+                                      self.profile(10.0, n=36)],
+                                     np.deg2rad(30.0)), [])
+
+
+class TestCornerTracking(unittest.TestCase):
+    """A crease on a curved part drifts angularly from section to section."""
+
+    @staticmethod
+    def profile(corners, n=72, radius=10.0, bump=1.6):
+        angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        radii = np.full(n, float(radius))
+        for index in corners:
+            radii[index % n] *= bump
+        return np.column_stack((radii * np.cos(angles), radii * np.sin(angles),
+                                np.zeros(n)))
+
+    def test_follows_a_drifting_crease(self):
+        profiles = [self.profile([10 + i, 40 + i]) for i in range(8)]
+        lines = pl.track_corner_lines(profiles, np.deg2rad(30.0), window=4)
+        self.assertEqual(len(lines), 8)
+        self.assertTrue(all(len(row) == len(lines[0]) for row in lines),
+                        "every section must split into the same count")
+        first = [row[0] for row in lines]
+        self.assertEqual(max(first) - min(first), 7,
+                         "the tracked line should move with the crease")
+
+    def test_sections_that_miss_a_crease_carry_it_through(self):
+        profiles = [self.profile([10, 40]) for _ in range(8)]
+        profiles[4] = self.profile([])          # a section with no corner at all
+        lines = pl.track_corner_lines(profiles, np.deg2rad(30.0))
+        self.assertEqual(len(lines), 8)
+        self.assertEqual(lines[4], lines[3],
+                         "the crease should run straight through the gap")
+
+    def test_a_crease_nobody_else_sees_is_dropped(self):
+        profiles = [self.profile([10, 40]) for _ in range(8)]
+        profiles[2] = self.profile([10, 40, 60])
+        lines = pl.track_corner_lines(profiles, np.deg2rad(30.0),
+                                      min_fraction=0.5)
+        self.assertEqual(len(lines[0]), 2)
+
+    def test_nothing_to_track(self):
+        profiles = [self.profile([]) for _ in range(5)]
+        self.assertEqual(pl.track_corner_lines(profiles, np.deg2rad(30.0)), [])
+
+    def test_mismatched_lengths_are_refused(self):
+        self.assertEqual(
+            pl.track_corner_lines([self.profile([10]), self.profile([10], n=36)],
+                                  np.deg2rad(30.0)), [])
+
+
+class TestSplitAtIndices(unittest.TestCase):
+    def test_splits_where_it_is_told(self):
+        pts = fx.circle(radius=10.0, n=40)
+        segments = pl.split_at_indices(pts, [0, 10, 20, 30])
+        self.assertEqual(len(segments), 4)
+        for segment in segments:
+            self.assertEqual(len(segment), 11)
+
+    def test_segments_chain_end_to_start(self):
+        pts = fx.circle(radius=10.0, n=40)
+        segments = pl.split_at_indices(pts, [3, 17, 29])
+        for i, segment in enumerate(segments):
+            np.testing.assert_allclose(segment[-1],
+                                       segments[(i + 1) % len(segments)][0])
+
+    def test_keeps_full_resolution(self):
+        """Unlike corner splitting, this must not thin the polyline - the
+        indices refer to the points as given."""
+        pts = fx.circle(radius=10.0, n=40)
+        total = sum(len(s) - 1 for s in pl.split_at_indices(pts, [0, 20]))
+        self.assertEqual(total, 40)
+
+    def test_too_few_indices_is_a_no_op(self):
+        pts = fx.circle(radius=10.0, n=20)
+        self.assertEqual(len(pl.split_at_indices(pts, [5])), 1)
+
+
 class TestDeviation(unittest.TestCase):
     def test_identical_polylines_have_zero_deviation(self):
         pts = fx.circle(n=40)
