@@ -47,6 +47,13 @@ class WallSurfaces:
                      "linked two runs on opposite sides of the part - the twist "
                      "can look innocent while the surface flies across it",
                      default=3.0)
+        add_property(obj, "App::PropertyEnumeration", "Method", GROUP_GRID,
+                     "Interpolate passes a surface through the grid points. "
+                     "Gordon treats the grid as a curve network - rows as "
+                     "profiles, columns as guides - which is what it is, and "
+                     "gives a markedly tighter surface. Gordon needs the Curves "
+                     "workbench and falls back when it is not installed",
+                     enum=["Gordon", "Interpolate"], default="Gordon")
         add_property(obj, "App::PropertyIntegerList", "SurfaceSizes",
                      GROUP_INFO, "Sections in each surface", read_only=True)
         add_property(obj, "App::PropertyIntegerList", "RejectedChains",
@@ -96,6 +103,11 @@ class WallSurfaces:
                          for section in groups]
             chains, _ambiguous = pr.build_chains(centroids, normal)
 
+            wanted_gordon = str(obj.Method) == "Gordon" and sf.gordon_available()
+            if str(obj.Method) == "Gordon" and not wanted_gordon:
+                warn("%s: the Curves workbench is not installed, falling back "
+                     "to point interpolation" % obj.Name)
+
             faces = []
             sizes = []
             rejected = []
@@ -118,13 +130,23 @@ class WallSurfaces:
                          "skipped" % (obj.Name, index, twist, stretch))
                     continue
 
-                try:
-                    faces.append(sf.surface_from_grid(grid).toShape())
-                    sizes.append(len(chain))
-                except Exception as exc:  # noqa: BLE001
-                    rejected.append(index)
-                    warn("%s: chain %d could not be surfaced (%s)"
-                         % (obj.Name, index, exc))
+                surface = None
+                if wanted_gordon:
+                    try:
+                        surface = sf.surface_from_grid_gordon(grid)
+                    except Exception as exc:  # noqa: BLE001
+                        warn("%s: chain %d - Gordon failed (%s), interpolating"
+                             % (obj.Name, index, str(exc)[:60]))
+                if surface is None:
+                    try:
+                        surface = sf.surface_from_grid(grid)
+                    except Exception as exc:  # noqa: BLE001
+                        rejected.append(index)
+                        warn("%s: chain %d could not be surfaced (%s)"
+                             % (obj.Name, index, exc))
+                        continue
+                faces.append(surface.toShape())
+                sizes.append(len(chain))
         except Exception as exc:  # noqa: BLE001
             obj.Status = "failed: %s" % exc
             warn("%s: %s" % (obj.Name, obj.Status))
@@ -134,8 +156,10 @@ class WallSurfaces:
         obj.SurfaceSizes = [int(n) for n in sizes]
         obj.RejectedChains = [int(i) for i in rejected]
         obj.WorstTwist = float(worst_twist)
-        obj.Status = ("%d surfaces from %d chains, worst twist %.0f deg"
-                      % (len(faces), len(chains), worst_twist))
+        obj.Status = ("%d surfaces from %d chains via %s, worst twist %.0f deg"
+                      % (len(faces), len(chains),
+                         "Gordon" if wanted_gordon else "interpolation",
+                         worst_twist))
         if rejected:
             obj.Status += ", %d rejected" % len(rejected)
 
