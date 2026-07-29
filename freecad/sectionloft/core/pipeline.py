@@ -17,6 +17,7 @@ from . import contours as ct
 from . import envelope as ev
 from . import planes as pf
 from . import polyline as pl
+from . import walls as wl
 from .fitting import FitParams, fit_contour
 
 LOG_PREFIX = "[SectionLoft] "
@@ -37,7 +38,8 @@ def _log(message):
 
 MODE_ALL = "All"
 MODE_ENVELOPE = "Envelope"
-CONTOUR_MODES = (MODE_ALL, MODE_ENVELOPE)
+MODE_WALLS = "Walls"
+CONTOUR_MODES = (MODE_ALL, MODE_ENVELOPE, MODE_WALLS)
 
 
 @dataclass
@@ -61,6 +63,9 @@ class SliceParams:
     envelope_convex: bool = False
     envelope_collapse_factor: float = 0.5
     envelope_axial_smoothing: int = 3
+    wall_tolerance: float = 0.05
+    wall_smoothing: int = 5
+    wall_minimum_points: int = 4
 
     # Fitting tolerance derivation, kept here because it depends on the mesh.
     auto_tolerance: bool = True
@@ -87,6 +92,7 @@ class Section:
     normal: object
     contours: list = field(default_factory=list)
     rejected: int = 0                     # contours dropped as too short
+    wall_counts: tuple = ()               # (outer runs, inner runs) in Walls mode
 
     @property
     def primary(self):
@@ -347,8 +353,44 @@ def slice_mesh(mesh, params=None):
                 previous_start = pts[0]
             section.contours.append(Contour(pts, closed, i, reversed_))
 
+        if params.contour_mode == MODE_WALLS:
+            _split_into_walls(section, params)
         sections.append(section)
     return sections
+
+
+def _split_into_walls(section, params):
+    """Replace a section's ribbons with their outer and inner wall runs.
+
+    A thin-walled part has two surfaces, so the model should carry two sets of
+    curves.  The runs are open: where a slot interrupts a wall it comes back as
+    two runs, which is how a hole should reach the surface stage - as a gap in
+    the wall rather than as a body of its own.
+    """
+    if not section.contours:
+        return
+
+    u, v, _ = pf.orthonormal_frame(section.normal)
+    frame = (section.base, u, v)
+    flat = np.vstack([ct.to_plane_coords(c.points, section.base, u, v)
+                      for c in section.contours])
+    hull = ev.convex_hull_2d(flat)
+    if len(hull) < 3:
+        return
+    centre = hull.mean(axis=0)
+
+    replacement = []
+    for contour in section.contours:
+        outer, inner = wl.split_walls(
+            contour.points, centre, frame,
+            tolerance=float(params.wall_tolerance),
+            window=int(params.wall_smoothing),
+            minimum_points=int(params.wall_minimum_points))
+        for run in outer + inner:
+            replacement.append(Contour(run, False, section.index, False))
+    if replacement:
+        section.wall_counts = (len(outer), len(inner))
+        section.contours = replacement
 
 
 def sections_to_shape(sections, primary_only=False):

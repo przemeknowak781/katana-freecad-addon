@@ -3,7 +3,7 @@
 Siatka wejściowa → rodzina przekrojów → dopasowane krzywe B-spline → loft, dla FreeCAD.
 
 **Status: v0.2.** Algorytm, trzy obiekty parametryczne, parowanie konturów między
-przekrojami, tryb obwiedni, kreator i workbench. 233 testy, wszystkie przechodzą
+przekrojami, tryb obwiedni, kreator i workbench. 247 testów, wszystkie przechodzą
 na FreeCAD 1.1.3. Sprawdzone na siatkach analitycznych i na prawdziwym skanie
 cienkościennej maski — ta ostatnia wymaga **trybu obwiedni**, w trybie konturów
 wychodzi bez sensu.
@@ -101,7 +101,7 @@ print(report.status)
 > (`robocopy ... /XF run_tests.py bench.py`) albo testuj z pustym
 > `FREECAD_USER_HOME`.
 
-233 testy, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
+247 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
 panel nie importuje `FreeCADGui`, więc daje się zbudować na offscreenowym Qt
 i wyklikać programowo. Moduły `planes`, `contours`, `polyline` i `pairing` są
 czystym numpy i uruchamiają się zwykłym interpreterem:
@@ -253,6 +253,42 @@ detekcja narożników pocięła na dwanaście kawałków.
 to samo co trzymanie się ich. Każdy splajn jest mierzony względem swojej
 polilinii i zastępowany odcinkami, gdy od niej odchodzi. To zbiło najgorszy
 przypadek z 2,077 do 0,209 mm.
+
+## Tryb ścian — dwie powierzchnie zamiast jednej
+
+`SectionSet.ContourMode = Walls` rozdziela każdą wstęgę przekroju na **ścianę
+zewnętrzną i wewnętrzną**, jako otwarte biegi.
+
+Wychodzi to z pomiaru, nie z założenia: przekrój cienkiej ścianki nie jest
+pierścieniem z otworem, tylko jednym zamkniętym konturem obiegającym ściankę tam
+i z powrotem — 10,33 mm² pola przy 41,6 mm obwodu, czyli ścianka około pół
+milimetra. Każda próba potraktowania takiej wstęgi jako profilu kończy się tak
+samo: loft się przenika, podział po długości łuku przeskakuje między ścianami
+i strzępi powierzchnię, a obwiednia wyrzuca ścianę wewnętrzną razem z otworami.
+
+Część ma dwie powierzchnie, więc model ma nieść dwa zestawy krzywych.
+
+**Reguła klasyfikacji.** Punkt należy do ściany zewnętrznej, gdy nic *w pobliżu
+jego własnego kierunku* nie leży dalej od środka. Sąsiedztwo kątowe jest tu całą
+sztuczką: porównanie punktu wyłącznie z własnym koszykiem klasyfikuje wszystko
+jako zewnętrzne, bo kontur o kilkuset punktach zostawia w koszyku co najwyżej
+jeden z nich, więc każdy jest w nim najdalszy. W odróżnieniu od obwiedni reguła
+jest lokalna, więc zatoka w ścianie zewnętrznej nadal jest ścianą zewnętrzną.
+
+**Filtr większościowy wzdłuż konturu** (`WallSmoothing`) jest konieczny, a nie
+kosmetyczny: surowa decyzja migocze tam, gdzie ściana biegnie stycznie do
+promienia, a każde migotanie tworzy kolejny bieg — bez filtra 20 przekrojów
+rozpadło się na 276 fragmentów.
+
+**Otwory i szczeliny wychodzą jako przerwy w biegach**, nie jako osobne bryły.
+To jest ta różnica, która pozwala potem zbudować powierzchnię z dziurą zamiast
+kilku brył obok siebie.
+
+Na `robomask_neat (1).stl`, 20 przekrojów: 153 biegi ścian, wszystkie dopasowane
+w trybie `Interpolate`, największa odchyłka **0,209 mm**.
+
+Powierzchni z tych biegów jeszcze nie ma — to następny krok i wymaga siatki
+punktów na każdą ścianę osobno.
 
 ## Tryb obwiedni — dla cienkościennych i podziurawionych
 

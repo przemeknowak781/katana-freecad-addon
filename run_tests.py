@@ -1,4 +1,4 @@
-"""Headless test runner.
+﻿"""Headless test runner.
 
     freecadcmd run_tests.py            # everything
     freecadcmd run_tests.py planes     # a subset, by module suffix
@@ -43,7 +43,7 @@ for _name in [n for n in sys.modules if n.startswith("freecad.sectionloft")]:
     del sys.modules[_name]
 
 PURE = ["test_planes", "test_contours", "test_polyline", "test_pairing",
-        "test_envelope", "test_packaging"]
+        "test_envelope", "test_walls", "test_packaging"]
 FREECAD = ["test_fitting", "test_pipeline", "test_objects", "test_wizard"]
 
 

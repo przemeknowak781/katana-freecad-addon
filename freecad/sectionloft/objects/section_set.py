@@ -69,9 +69,10 @@ class SectionSet:
         add_property(obj, "App::PropertyEnumeration", "ContourMode",
                      GROUP_FILTER,
                      "All keeps every contour a plane cuts. Envelope replaces "
-                     "them with their outer boundary - the right choice for "
-                     "thin-walled parts, whose sections are ribbons that cannot "
-                     "be lofted, and for anything with slots",
+                     "them with their outer boundary. Walls splits each ribbon "
+                     "into its outer and inner wall, as open runs - a thin part "
+                     "has two surfaces, and a slot becomes a gap in a run "
+                     "rather than a body of its own",
                      enum=list(pp.CONTOUR_MODES), default=pp.MODE_ALL)
         add_property(obj, "App::PropertyInteger", "EnvelopeSamples",
                      GROUP_FILTER,
@@ -98,6 +99,15 @@ class SectionSet:
                      "between planes cuts inside the part wherever it bulges "
                      "in between, so a packaging envelope needs a little air",
                      default=0.0)
+        add_property(obj, "App::PropertyLength", "WallTolerance", GROUP_FILTER,
+                     "How far inside the outermost point a point may still "
+                     "count as outer wall. A scanned wall is never exactly "
+                     "radial", default=0.05)
+        add_property(obj, "App::PropertyInteger", "WallSmoothing", GROUP_FILTER,
+                     "Majority filter width along the contour. The raw decision "
+                     "flickers where the wall runs tangential to the ray, and "
+                     "every flicker becomes another run: unfiltered, 20 sections "
+                     "broke into 276 fragments", default=5)
         add_property(obj, "App::PropertyLength", "MinContourLength",
                      GROUP_FILTER,
                      "Contours shorter than this are dropped as artefacts",
@@ -156,6 +166,8 @@ class SectionSet:
             envelope_convex=bool(obj.ConvexEnvelope),
             envelope_collapse_factor=max(0.0, float(obj.EnvelopeBridging)),
             envelope_axial_smoothing=max(0, int(obj.AxialSmoothing)),
+            wall_tolerance=value(obj.WallTolerance),
+            wall_smoothing=max(1, int(obj.WallSmoothing)),
             min_contour_length=value(obj.MinContourLength),
             close_tolerance=close_tolerance,
             # Orientation and seam belong to FittedSections: they are fitting
