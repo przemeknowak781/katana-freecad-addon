@@ -76,6 +76,11 @@ class SectionSet:
         add_property(obj, "App::PropertyInteger", "EnvelopeSamples",
                      GROUP_FILTER,
                      "Number of rays used to trace the envelope", default=180)
+        add_property(obj, "App::PropertyInteger", "AxialSmoothing", GROUP_FILTER,
+                     "Median filter width along the slicing direction. Removes "
+                     "the section-to-section zig-zag that shows up as a "
+                     "corrugated surface; a median rather than an average, so "
+                     "a real step keeps its edge. 0 turns it off", default=3)
         add_property(obj, "App::PropertyFloat", "EnvelopeBridging",
                      GROUP_FILTER,
                      "How readily the envelope bridges instead of following a "
@@ -150,6 +155,7 @@ class SectionSet:
             clearance=value(obj.Clearance),
             envelope_convex=bool(obj.ConvexEnvelope),
             envelope_collapse_factor=max(0.0, float(obj.EnvelopeBridging)),
+            envelope_axial_smoothing=max(0, int(obj.AxialSmoothing)),
             min_contour_length=value(obj.MinContourLength),
             close_tolerance=close_tolerance,
             # Orientation and seam belong to FittedSections: they are fitting

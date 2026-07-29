@@ -86,6 +86,11 @@ class FittedSections:
                      "joined", default=True)
         add_property(obj, "App::PropertyAngle", "CornerAngle", GROUP_SHAPE,
                      "Turn angle counted as a corner", default=30.0)
+        add_property(obj, "App::PropertyInteger", "MaxCorners", GROUP_SHAPE,
+                     "Most creases to carry through an envelope chain. Each one "
+                     "costs an edge in every profile, and lofting profiles of a "
+                     "dozen edges is where OCC turns slow and starts failing. "
+                     "0 lifts the cap", default=8)
         add_property(obj, "App::PropertyInteger", "CornerDrift", GROUP_SHAPE,
                      "How many samples a crease may move between neighbouring "
                      "envelope sections and still count as the same crease. A "
@@ -250,7 +255,8 @@ class FittedSections:
             per_section = pl.track_corner_lines(
                 profiles, np.deg2rad(value(obj.CornerAngle)),
                 window=max(1, int(obj.CornerDrift)),
-                min_fraction=float(obj.CornerAgreement))
+                min_fraction=float(obj.CornerAgreement),
+                limit=max(0, int(obj.MaxCorners)))
         if not per_section:
             return [(entry, fit_contour(entry[2], entry[3], params))
                     for entry in prepared], 0

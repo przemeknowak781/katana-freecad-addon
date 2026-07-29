@@ -305,7 +305,8 @@ def merge_adjacent(indices, size, separation=2):
     return sorted(group[len(group) // 2] % int(size) for group in groups)
 
 
-def track_corner_lines(profiles, angle_threshold, window=4, min_fraction=0.35):
+def track_corner_lines(profiles, angle_threshold, window=4, min_fraction=0.35,
+                       limit=8):
     """Follow creases along a family of equally-sampled profiles.
 
     Returns one list of split indices per profile, all the same length, or an
@@ -367,6 +368,14 @@ def track_corner_lines(profiles, angle_threshold, window=4, min_fraction=0.35):
     lines = [line for line in lines if line["support"] >= needed]
     if len(lines) < 2:
         return []
+
+    # Each crease costs an edge in every profile, and lofting profiles of a
+    # dozen edges is where OCC turns slow and unreliable: measured at 25 seconds
+    # for one loft and an outright BRep_API failure for the same shape with a
+    # different clearance.  Keep the creases the most sections agree on.
+    if limit and len(lines) > int(limit):
+        lines.sort(key=lambda line: -line["support"])
+        lines = lines[:int(limit)]
 
     lines.sort(key=lambda line: line["index"][anchor])
     return [[line["index"][section] for line in lines]

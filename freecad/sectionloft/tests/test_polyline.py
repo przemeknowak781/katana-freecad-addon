@@ -226,6 +226,20 @@ class TestCornerTracking(unittest.TestCase):
                                       min_fraction=0.5)
         self.assertEqual(len(lines[0]), 2)
 
+    def test_the_crease_count_is_capped(self):
+        """Every crease costs an edge in each profile, and lofting profiles of a
+        dozen edges is where OCC turns slow and starts failing outright."""
+        profiles = [self.profile(list(range(0, 72, 8))) for _ in range(6)]
+        lines = pl.track_corner_lines(profiles, np.deg2rad(30.0), limit=4)
+        self.assertTrue(lines, "the fixture stopped producing creases")
+        self.assertEqual(len(lines[0]), 4)
+
+    def test_the_cap_can_be_lifted(self):
+        profiles = [self.profile(list(range(0, 72, 8))) for _ in range(6)]
+        capped = pl.track_corner_lines(profiles, np.deg2rad(30.0), limit=4)
+        uncapped = pl.track_corner_lines(profiles, np.deg2rad(30.0), limit=0)
+        self.assertGreater(len(uncapped[0]), len(capped[0]))
+
     def test_nothing_to_track(self):
         profiles = [self.profile([]) for _ in range(5)]
         self.assertEqual(pl.track_corner_lines(profiles, np.deg2rad(30.0)), [])

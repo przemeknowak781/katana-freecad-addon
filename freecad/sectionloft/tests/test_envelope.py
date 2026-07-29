@@ -154,6 +154,62 @@ class TestConcavity(unittest.TestCase):
         self.assertGreater(_area(bridged), _area(followed))
 
 
+class TestAxialField(unittest.TestCase):
+    """Gaps are resolved along the slicing direction, not per section.
+
+    Bridging a missing sample inside one section while its neighbour follows the
+    material puts a step in the surface: measured at up to 10 mm on the test
+    mesh, and most of what made the result look corrugated.
+    """
+
+    def test_a_gap_is_filled_from_the_sections_above_and_below(self):
+        material = np.array([[5.0], [np.nan], [7.0]])
+        hull = np.array([[9.0], [9.0], [9.0]])
+        filled = ev.fill_along_axis(material, hull, smoothing=0)
+        self.assertAlmostEqual(filled[1, 0], 6.0,
+                               msg="should interpolate, not jump to the hull")
+
+    def test_an_angle_no_section_can_see_falls_back_to_the_hull(self):
+        material = np.full((3, 1), np.nan)
+        hull = np.array([[9.0], [8.0], [7.0]])
+        filled = ev.fill_along_axis(material, hull, smoothing=0)
+        np.testing.assert_allclose(filled[:, 0], [9.0, 8.0, 7.0])
+
+    def test_the_median_removes_a_single_section_zigzag(self):
+        material = np.array([[5.0], [5.0], [9.0], [5.0], [5.0]])
+        filled = ev.fill_along_axis(material, np.zeros((5, 1)), smoothing=3)
+        self.assertAlmostEqual(filled[2, 0], 5.0)
+
+    def test_the_median_keeps_a_real_step(self):
+        """A median and not an average, so the edge of a flat facet survives
+        instead of being ramped over three sections."""
+        material = np.array([[5.0], [5.0], [5.0], [9.0], [9.0], [9.0]])
+        filled = ev.fill_along_axis(material, np.zeros((6, 1)), smoothing=3)
+        np.testing.assert_allclose(filled[:, 0], [5, 5, 5, 9, 9, 9])
+
+    def test_smoothing_off_leaves_the_data_alone(self):
+        material = np.array([[5.0], [9.0], [5.0]])
+        filled = ev.fill_along_axis(material, np.zeros((3, 1)), smoothing=0)
+        np.testing.assert_allclose(filled[:, 0], [5.0, 9.0, 5.0])
+
+
+class TestEnvelopeProfile(unittest.TestCase):
+    def test_reports_gaps_as_nan_rather_than_deciding(self):
+        arc = fx.circle(radius=10.0, n=80)[:40, :2]
+        material, hull = ev.envelope_profile([np.vstack([arc, arc[::-1] * 0.9])],
+                                             centre=(0.0, 0.0), samples=72)
+        self.assertEqual(len(material), 72)
+        self.assertTrue(np.any(np.isnan(material)),
+                        "angles with nothing to hit must come back as nan")
+        self.assertTrue(np.all(hull > 0.0))
+
+    def test_a_full_circle_has_no_gaps(self):
+        poly = fx.circle(radius=10.0, n=90)[:, :2]
+        material, _ = ev.envelope_profile([poly], centre=(0.0, 0.0), samples=72)
+        self.assertFalse(np.any(np.isnan(material)))
+        self.assertLess(abs(np.nanmean(material) - 10.0), 0.05)
+
+
 class TestSharedAxis(unittest.TestCase):
     """Profiles only line up between sections if they share an origin, and the
     origin has to be inside every one of them."""

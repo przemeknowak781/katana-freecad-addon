@@ -309,6 +309,12 @@ def _fit_at_once(points, params, split_indices):
         segments = pl.split_at_indices(points, split_indices, closed=True)
         result.corners = sorted({int(i) for i in split_indices})
 
+        # One edge per segment, deliberately.  Joining them into a single
+        # B-spline with C0 knots was tried - it keeps the corners and lofts a
+        # single edge per profile - but each section then carries its own
+        # parameterisation, and makeLoft matches profiles by parameter: the
+        # surface folded to 30% of the volume its sections implied, and pinning
+        # the parameter ranges by segment index made it worse, not better.
         edges = []
         kept = []
         for segment in segments:

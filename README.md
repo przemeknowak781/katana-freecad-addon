@@ -3,7 +3,7 @@
 Siatka wejściowa → rodzina przekrojów → dopasowane krzywe B-spline → loft, dla FreeCAD.
 
 **Status: v0.2.** Algorytm, trzy obiekty parametryczne, parowanie konturów między
-przekrojami, tryb obwiedni, kreator i workbench. 217 testów, wszystkie przechodzą
+przekrojami, tryb obwiedni, kreator i workbench. 226 testów, wszystkie przechodzą
 na FreeCAD 1.1.3. Sprawdzone na siatkach analitycznych i na prawdziwym skanie
 cienkościennej maski — ta ostatnia wymaga **trybu obwiedni**, w trybie konturów
 wychodzi bez sensu.
@@ -101,7 +101,7 @@ print(report.status)
 > (`robocopy ... /XF run_tests.py bench.py`) albo testuj z pustym
 > `FREECAD_USER_HOME`.
 
-217 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
+226 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
 panel nie importuje `FreeCADGui`, więc daje się zbudować na offscreenowym Qt
 i wyklikać programowo. Moduły `planes`, `contours`, `polyline` i `pairing` są
 czystym numpy i uruchamiają się zwykłym interpreterem:
@@ -256,7 +256,18 @@ teraz liczona jako środek **przecięcia otoczek wszystkich przekrojów** (obcin
 Sutherland-Hodgman); gdy przecięcie jest puste, wybierany jest punkt zawarty
 w największej liczbie przekrojów, a reszta dostaje ostrzeżenie.
 
-**3. Załamania śledzone jako linie, nie jako stałe kąty.** Załamanie na
+**3. Pole `r(θ, z)`, nie dwadzieścia niezależnych przekrojów.** Gdy jeden
+przekrój mostkuje kąt otoczką, a sąsiedni idzie za materiałem, powstaje uskok —
+zmierzone do 10 mm i to była większość pofałdowania. Brakujące próbki są teraz
+uzupełniane **z tego samego kąta w sąsiednich przekrojach**, a dopiero kąt,
+którego nie widzi żaden przekrój, spada na otoczkę. Na wierzchu idzie mediana
+wzdłuż osi (`AxialSmoothing`, domyślnie 3) — mediana, a nie średnia, żeby
+prawdziwy uskok zachował krawędź zamiast rozjeżdżać się na trzy przekroje.
+
+Efekt na zygzaku promienia między sąsiednimi przekrojami: **18,9–26,3% zmian
+kierunku spadło do 0,0–0,1%**, średnia krzywizna osiowa o 55%.
+
+**4. Załamania śledzone jako linie, nie jako stałe kąty.** Załamanie na
 zakrzywionej części wędruje kątowo między przekrojami. Przypięcie wszystkich
 przekrojów do jednego indeksu gubiło je (2 krawędzie, zwrot 133°). Każde
 załamanie jest teraz znajdowane w jednym przekroju i śledzone do sąsiadów
@@ -264,9 +275,37 @@ w oknie `CornerDrift` próbek, a przekroje, które go nie widzą, przenoszą je
 prosto dalej. Linia, którą popiera mniej niż `CornerAgreement` rodziny, jest
 odrzucana jako szum triangulacji jednego przekroju.
 
-**4. Plaster o szerokości pełnego rozstawu.** Loft interpoluje między dwoma
+Linia, którą popiera mniej niż `CornerAgreement` rodziny, jest odrzucana, a
+liczba załamań jest ograniczona przez `MaxCorners` (domyślnie 8) — o czym niżej.
+
+**5. Plaster o szerokości pełnego rozstawu.** Loft interpoluje między dwoma
 sąsiednimi profilami, więc punkt między nimi jest objęty tylko wtedy, gdy oba
 profile pokrywają jego wysokość.
+
+### Czego nie udało się pogodzić
+
+**Powierzchnia prostokreślna jest wymuszona, gdy profile mają narożniki.**
+Podział na krawędzie daje ostre pionowe krawędzie, ale `makeLoft` na profilach
+o kilkunastu krawędziach staje się wolny i zawodny: zmierzone 25 s na jeden loft,
+a przy innej wartości luzu ten sam kształt kończy się `BRep_API: command not
+done`. Gładki loft z takich profili przestrzeliwuje i wypuszcza płetwy poza
+część. Stąd `MaxCorners = 8` i zalecenie `Ruled = True` w trybie obwiedni —
+kosztem widocznych pasów na każdym przekroju.
+
+Próbowałem to obejść, sklejając segmenty w **jedną** krzywą z krotnością węzła
+równą stopniowi (`BSplineCurve.join`) — narożniki przeżywają, profil ma jedną
+krawędź, loft jest szybki. Nie weszło do wersji, bo każdy przekrój dostaje wtedy
+własną parametryzację, a `makeLoft` dopasowuje profile po parametrze: powierzchnia
+składała się do 30% objętości wynikającej z jej własnych przekrojów, a przypięcie
+przedziałów parametru do indeksu segmentu pogorszyło sprawę zamiast pomóc.
+Uważam to za właściwy kierunek na później, ale nie zostawię w kodzie czegoś, co
+psuje wynik.
+
+**Mediana osiowa ścina pojedyncze wypustki.** To ta sama operacja, która usuwa
+zygzak — nie da się mieć obu naraz. Zawieranie spadło z 1,1% do 7,5–9,1%
+wierzchołków poza obwiednią i luz tego nie nadrabia (przy 1,2 mm nadal 7,9%),
+bo ucieczki nie są równomierne. `AxialSmoothing = 0` przywraca zawieranie
+i pofałdowanie.
 
 ### Wynik na `robomask_neat (1).stl`
 
@@ -276,12 +315,18 @@ liczona jako otoczka wypukła bez śledzenia załamań:
 
 | Miara | Otoczka wypukła | Teraz |
 |---|---|---|
-| Najostrzejszy zwrot w krzywej | 55° | **174°** (przekrój ma 178°) |
-| Szczelina do materiału, średnio | 2,111 mm | **1,571 mm** |
-| Wierzchołki poza obwiednią | 0,8% | 1,1% |
-| `SectionVolumeRatio` | 1,033 | 0,956 |
-| Odchyłka dopasowania | 0,246 mm | 0,248 mm (tolerancja 0,249) |
-| Czas | 2 s | 4,5 s |
+| Najostrzejszy zwrot w krzywej | 55° | **168°** (przekrój ma 179°) |
+| Mediana zwrotu | 36° | **134°** (przekrój ma 163°) |
+| Zmiany kierunku promienia między przekrojami | 18,9% | **0,0%** |
+| Szczelina do materiału, średnio | 2,111 mm | 2,319 mm |
+| Wierzchołki poza obwiednią | 0,8% | 9,1% |
+| `SectionVolumeRatio` | 1,033 | 0,981 |
+| Odchyłka dopasowania | 0,246 mm | 0,249 mm (tolerancja 0,249) |
+| Czas | 2 s | 3,2 s |
+
+Pomiar przy 20 przekrojach, `Clearance = 0,8 mm`. Ostrość i gładkość poszły
+wyraźnie w górę, zawieranie w dół — to jest ten sam kompromis co przy medianie
+osiowej, opisany niżej.
 
 Bryła jest w obu przypadkach jedna, zamknięta i `isValid()`. Dla porównania ten
 sam plik w trybie `All`: gwiazda płaskich odłamków, 66 894 mm³ przy 270 mm³

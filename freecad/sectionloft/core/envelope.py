@@ -117,6 +117,86 @@ def smooth_radii(radii, window):
     return np.convolve(padded, kernel, mode="valid")
 
 
+def envelope_profile(polygons, centre, samples=DEFAULT_SAMPLES,
+                     collapse_factor=0.5):
+    """Raw radii for one section: ``(material, hull)``.
+
+    ``material`` carries ``nan`` where the ray found nothing, or found only
+    something so far inside the hull that it must have escaped through an
+    opening.  Deciding what to do about those gaps is the caller's business -
+    and it should not be decided section by section, because a section that
+    bridges where its neighbour follows produces a step in the surface.  On the
+    test mesh those steps reached 10 mm and were most of the corrugation.
+    """
+    polys = [np.asarray(p, dtype=float).reshape(-1, 2) for p in polygons
+             if len(p) >= 3]
+    if not polys:
+        return None, None
+    starts, ends = _segments(polys)
+    if starts is None:
+        return None, None
+
+    hull = convex_hull_2d(np.vstack(polys))
+    if len(hull) < 3:
+        return None, None
+    hull_starts, hull_ends = _segments([hull])
+    if centre is None or not _point_in_polygon(centre, hull):
+        centre = hull.mean(axis=0)
+    centre = np.asarray(centre, dtype=float).reshape(2)
+
+    angles = np.linspace(0.0, 2.0 * np.pi, int(samples), endpoint=False)
+    material = np.full(len(angles), np.nan)
+    hull_radii = np.zeros(len(angles))
+    for i, angle in enumerate(angles):
+        direction = np.array([np.cos(angle), np.sin(angle)])
+        outer = _ray_hits(centre, direction, hull_starts, hull_ends)
+        hull_radii[i] = 0.0 if outer is None else outer
+        hit = _ray_hits(centre, direction, starts, ends)
+        if hit is not None and hit >= collapse_factor * hull_radii[i]:
+            material[i] = hit
+    return material, hull_radii
+
+
+def fill_along_axis(material, hull, smoothing=3):
+    """Turn a stack of raw section profiles into a coherent radial field.
+
+    ``material`` and ``hull`` are ``(sections, angles)``.  Gaps are filled from
+    the *same angle in neighbouring sections* rather than from the hull of the
+    section they are in: a feature that a ray misses at one height is almost
+    always visible just above and below, and interpolating along the axis keeps
+    the surface continuous where bridging per section put a step in it.  An
+    angle no section can see falls back to the hull, which is the only honest
+    answer there.
+
+    A median along the axis then removes single-section spikes.  It is a median
+    and not an average because a real step - the edge of a flat facet - has to
+    survive, and averaging would ramp it over three sections.
+    """
+    material = np.array(material, dtype=float)
+    hull = np.array(hull, dtype=float)
+    sections, angles = material.shape
+
+    for i in range(angles):
+        column = material[:, i]
+        known = ~np.isnan(column)
+        if not np.any(known):
+            material[:, i] = hull[:, i]
+        elif not np.all(known):
+            index = np.arange(sections)
+            material[:, i] = np.interp(index, index[known], column[known])
+
+    window = int(smoothing)
+    if window >= 3 and sections >= window:
+        if window % 2 == 0:
+            window += 1
+        half = window // 2
+        padded = np.vstack([material[:1]] * half + [material]
+                           + [material[-1:]] * half)
+        material = np.array([np.median(padded[k:k + window], axis=0)
+                             for k in range(sections)])
+    return material
+
+
 def envelope_2d(polygons, centre=None, samples=DEFAULT_SAMPLES, smoothing=0,
                 collapse_factor=0.5, hull_fraction=0.3, clearance=0.0,
                 convex=False):

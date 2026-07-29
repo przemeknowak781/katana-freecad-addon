@@ -60,6 +60,7 @@ class SliceParams:
     clearance: float = 0.0
     envelope_convex: bool = False
     envelope_collapse_factor: float = 0.5
+    envelope_axial_smoothing: int = 3
 
     # Fitting tolerance derivation, kept here because it depends on the mesh.
     auto_tolerance: bool = True
@@ -241,27 +242,49 @@ def envelope_sections(mesh, params, planes, origin, direction):
               "to their own centre; the loft may twist there"
               % (misses, len(planes)))
 
-    sections = []
-    for index, ((base, normal), polygons) in enumerate(zip(planes, projected)):
-        section = Section(index=index, base=base, normal=normal)
+    # Second pass: raw radii per section, then resolve the gaps *along the axis*
+    # rather than section by section, which is what stops one section bridging
+    # where its neighbour follows and putting a step in the surface.
+    samples = int(params.envelope_samples)
+    collapse = (2.0 if params.envelope_convex
+                else float(params.envelope_collapse_factor))
+    material = np.full((len(planes), samples), np.nan)
+    hull_radii = np.zeros((len(planes), samples))
+    usable = []
+    for index, ((base, _normal), polygons) in enumerate(zip(planes, projected)):
         if not polygons:
             _warn("section %d: nothing to build an envelope from" % index)
-            sections.append(section)
             continue
-
-        profile = ev.envelope_2d(
-            polygons, axis, samples=int(params.envelope_samples),
-            collapse_factor=float(params.envelope_collapse_factor),
-            clearance=float(params.clearance),
-            convex=bool(params.envelope_convex))
-        if profile is None or len(profile) < 3:
+        row, hull_row = ev.envelope_profile(polygons, axis, samples, collapse)
+        if row is None:
             _warn("section %d: could not build an envelope" % index)
-            sections.append(section)
             continue
+        material[index] = row
+        hull_radii[index] = hull_row
+        usable.append(index)
 
-        outline = base + profile[:, 0:1] * u + profile[:, 1:2] * v
-        outline, _ = ct.unify_orientation(outline, normal, base)
-        section.contours = [Contour(outline, True, index, False)]
+    if not usable:
+        return [Section(index=i, base=b, normal=n)
+                for i, (b, n) in enumerate(planes)]
+
+    field = ev.fill_along_axis(material[usable], hull_radii[usable],
+                               smoothing=int(params.envelope_axial_smoothing))
+    if params.clearance:
+        field = field + float(params.clearance)
+
+    angles = np.linspace(0.0, 2.0 * np.pi, samples, endpoint=False)
+    unit = np.column_stack((np.cos(angles), np.sin(angles)))
+
+    sections = []
+    row_by_index = dict(zip(usable, field))
+    for index, (base, normal) in enumerate(planes):
+        section = Section(index=index, base=base, normal=normal)
+        row = row_by_index.get(index)
+        if row is not None:
+            flat = axis + unit * row[:, None]
+            outline = base + flat[:, 0:1] * u + flat[:, 1:2] * v
+            outline, _ = ct.unify_orientation(outline, normal, base)
+            section.contours = [Contour(outline, True, index, False)]
         sections.append(section)
     return sections
 
