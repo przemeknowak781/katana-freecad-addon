@@ -46,8 +46,19 @@ class SectionLoft:
         add_property(obj, "App::PropertyEnumeration", "EndCap", GROUP_CAPS,
                      "How the last section is closed",
                      enum=["Planar", "None", "Point"], default="Planar")
+        add_property(obj, "App::PropertyBool", "SkipInvalid", GROUP_SURFACE,
+                     "Drop a chain whose loft comes out invalid instead of "
+                     "putting broken geometry in the result", default=True)
         add_property(obj, "App::PropertyFloat", "Volume", GROUP_INFO,
                      "Volume of the result in mm3, 0 for a shell",
+                     read_only=True)
+        add_property(obj, "App::PropertyIntegerList", "InvalidChains",
+                     GROUP_INFO, "Chains whose loft was rejected as invalid",
+                     read_only=True)
+        add_property(obj, "App::PropertyFloat", "MeshVolumeRatio", GROUP_INFO,
+                     "Result volume divided by the volume of the source mesh. "
+                     "1.0 is a faithful result; anything far from it means the "
+                     "sections were paired into bodies that are not there",
                      read_only=True)
         add_property(obj, "App::PropertyString", "Status", GROUP_INFO,
                      "Result of the last recompute", read_only=True)
@@ -92,6 +103,73 @@ class SectionLoft:
             profiles[-1] = Part.Vertex(profiles[-1].CenterOfMass)
         return profiles
 
+    @staticmethod
+    def usable(shape, solid):
+        """``(shape, reason)`` - a repaired shape, or None and why it was dropped.
+
+        ``makeLoft`` returns something even for input it cannot really handle:
+        on a scanned mesh two of seven chains came back as self-intersecting
+        wires with an unorientable shell, one reporting a volume of minus
+        eighteen million cubic millimetres.  Handing that over labelled as a
+        result is worse than saying nothing.
+
+        Validity alone is not enough of a test.  ``fix()`` will happily turn a
+        self-intersecting loft into a *valid* shape enclosing no volume at all,
+        so a solid also has to enclose something positive: a negative volume
+        means the shell came out inside-out, and zero means it collapsed.
+        """
+        if shape is None or shape.isNull():
+            return None, "empty"
+
+        candidate = shape
+        if not candidate.isValid():
+            try:
+                repaired = shape.copy()
+                repaired.fix(1e-7, 1e-7, 1e-7)
+                candidate = repaired if repaired.isValid() else None
+            except Exception:  # noqa: BLE001 - fix() is best effort
+                candidate = None
+            if candidate is None:
+                return None, "invalid geometry (self-intersecting or unorientable)"
+
+        if solid and candidate.Volume <= 1e-9:
+            return None, ("encloses no volume (%.3f mm3), the sections do not "
+                          "bound a body" % candidate.Volume)
+        return candidate, None
+
+    @staticmethod
+    def source_mesh(obj):
+        """Walk SectionLoft -> FittedSections -> SectionSet -> Mesh."""
+        node = getattr(obj, "Sections", None)
+        for _ in range(4):
+            if node is None:
+                return None
+            mesh = getattr(node, "Mesh", None)
+            if mesh is not None:
+                return mesh
+            node = getattr(node, "Source", None)
+        return None
+
+    def check_against_mesh(self, obj):
+        """Compare the result volume with the mesh it came from.
+
+        Every other number this object reports can look healthy while the result
+        is nonsense: on a thin shell with slots the chain produced six valid
+        solids, no failed sections and a 0.3 mm fit deviation, and the geometry
+        was a starburst of shards enclosing 248 times the volume of the mesh.
+        Fit deviation measures curves against contours; nothing measured the
+        surface against the object. This is the cheapest number that does.
+        """
+        mesh = self.source_mesh(obj)
+        if mesh is None or not mesh.isSolid() or mesh.Volume <= 0:
+            return 0.0
+        ratio = float(obj.Volume) / float(mesh.Volume)
+        if ratio and not 0.5 <= ratio <= 2.0:
+            warn("%s: the result encloses %.1fx the volume of the mesh - the "
+                 "sections are probably being paired into bodies that are not "
+                 "there" % (obj.Name, ratio))
+        return ratio
+
     def execute(self, obj):
         chains = self.chains(obj)
         if not chains:
@@ -107,16 +185,26 @@ class SectionLoft:
 
         shapes = []
         failures = []
+        invalid = []
         for index, wires in enumerate(chains):
             if len(wires) < 2:
                 failures.append("chain %d has fewer than 2 sections" % index)
                 continue
             try:
                 profiles = self.apply_caps(wires, obj)
-                shapes.append(Part.makeLoft(profiles, solid, bool(obj.Ruled),
-                                            bool(obj.Closed)))
+                result = Part.makeLoft(profiles, solid, bool(obj.Ruled),
+                                       bool(obj.Closed))
             except Exception as exc:  # noqa: BLE001
                 failures.append("chain %d: %s" % (index, exc))
+                continue
+
+            if bool(obj.SkipInvalid):
+                result, reason = self.usable(result, solid)
+                if result is None:
+                    invalid.append(index)
+                    failures.append("chain %d: %s" % (index, reason))
+                    continue
+            shapes.append(result)
 
         if not shapes:
             obj.Status = "loft failed: %s" % ("; ".join(failures) or "no input")
@@ -126,9 +214,17 @@ class SectionLoft:
         result = shapes[0] if len(shapes) == 1 else Part.Compound(shapes)
         obj.Shape = result
         obj.Volume = float(result.Volume) if solid else 0.0
+        obj.InvalidChains = [int(i) for i in invalid]
         obj.Status = "lofted %d of %d chains%s" % (
             len(shapes), len(chains),
             ", volume %.1f mm3" % obj.Volume if solid else " (shell)")
+        if invalid:
+            obj.Status += ", %d rejected as invalid" % len(invalid)
+
+        obj.MeshVolumeRatio = self.check_against_mesh(obj) if solid else 0.0
+        if obj.MeshVolumeRatio and not 0.5 <= obj.MeshVolumeRatio <= 2.0:
+            obj.Status += (", WARNING %.1fx the mesh volume"
+                           % obj.MeshVolumeRatio)
         for message in failures:
             warn("%s: %s" % (obj.Name, message))
 

@@ -101,6 +101,83 @@ def detect_corners(points, angle_threshold, closed=False):
     return [int(i) for i in np.where(np.nan_to_num(angles, nan=-1.0) > thr)[0]]
 
 
+def strongest_corners(points, corners, limit, closed=False):
+    """Keep only the ``limit`` sharpest of the given corners."""
+    if limit is None or limit <= 0 or len(corners) <= limit:
+        return list(corners)
+    angles = turn_angles(points, closed)
+    ranked = sorted(corners, key=lambda i: angles[i], reverse=True)
+    return sorted(ranked[:int(limit)])
+
+
+def _cumulative_length(points, closed):
+    pts = as_points(points)
+    steps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    if closed:
+        steps = np.append(steps, np.linalg.norm(pts[0] - pts[-1]))
+    return np.concatenate([[0.0], np.cumsum(steps)])
+
+
+def pad_split_points(points, corners, target, closed=False):
+    """Extend a set of split points to exactly ``target`` entries.
+
+    Returns ``(points, splits)`` - the points come back because reaching the
+    target usually means **inserting** vertices, not just choosing among the
+    ones already there.  After decimation a rectangular contour is four points
+    long, so picking existing vertices caps the split count at four however many
+    the chain needs.  The inserted points lie exactly on the polyline, so they
+    change the geometry not at all.
+
+    Every detected corner is kept; the extra splits land at the arc-length
+    midpoint of the longest remaining stretch.  That is what makes a chain
+    loftable without giving anything up: a loft needs the same number of edges
+    in every section, and a section that genuinely has fewer corners than its
+    neighbours gets the difference made up at corresponding places rather than
+    losing the corners it does have.
+    """
+    pts = as_points(points).copy()
+    target = int(target)
+    splits = sorted({int(i) % len(pts) for i in corners})
+    if len(pts) < 3 or target <= len(splits):
+        return pts, splits
+    if not splits:
+        splits = [0]
+
+    while len(splits) < target:
+        lengths = _cumulative_length(pts, closed)
+        total = float(lengths[-1])
+        if total <= 0.0:
+            break
+
+        # Longest stretch between consecutive splits, wrapping when closed.
+        gaps = []
+        for k, start in enumerate(splits):
+            if k + 1 < len(splits):
+                gaps.append((lengths[splits[k + 1]] - lengths[start], start))
+            elif closed:
+                gaps.append((total - lengths[start] + lengths[splits[0]], start))
+        if not gaps:
+            break
+        span, start = max(gaps)
+        if span <= 1e-12:
+            break
+
+        midpoint = lengths[start] + span / 2.0
+        segment = int(np.searchsorted(lengths, midpoint, side="right") - 1)
+        segment = max(0, min(segment, len(pts) - 1))
+        step = lengths[segment + 1] - lengths[segment]
+        ratio = 0.5 if step <= 1e-12 else (midpoint - lengths[segment]) / step
+        following = (segment + 1) % len(pts)
+        new_point = pts[segment] + ratio * (pts[following] - pts[segment])
+
+        insert_at = segment + 1
+        pts = np.insert(pts, insert_at, new_point, axis=0)
+        splits = [i + 1 if i >= insert_at else i for i in splits]
+        splits.append(insert_at)
+        splits.sort()
+    return pts, splits
+
+
 def split_at_corners(points, corners, closed=False):
     """Split a contour into segments at the given vertex indices.
 

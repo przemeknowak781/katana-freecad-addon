@@ -13,6 +13,8 @@ import Part
 from ..core import contours as ct
 from ..core import pairing as pr
 from ..core import polyline as pl
+from dataclasses import replace
+
 from ..core.fitting import FitParams, fit_contour
 from .common import (ViewProviderBase, add_property, log, value, vector, warn,
                      wire_points)
@@ -76,6 +78,12 @@ class FittedSections:
         add_property(obj, "App::PropertyBool", "CornerDetection", GROUP_SHAPE,
                      "Split the contour at corners and fit the pieces "
                      "separately", default=True)
+        add_property(obj, "App::PropertyBool", "UniformChainTopology",
+                     GROUP_SHAPE,
+                     "Refit a chain without corner splitting when its sections "
+                     "end up with different edge counts. Lofting needs matching "
+                     "profiles; sections split into 4, 9 and 18 edges cannot be "
+                     "joined", default=True)
         add_property(obj, "App::PropertyAngle", "CornerAngle", GROUP_SHAPE,
                      "Turn angle counted as a corner", default=30.0)
         add_property(obj, "App::PropertyBool", "SeamSmoothing", GROUP_SEAM,
@@ -240,6 +248,31 @@ class FittedSections:
         return ct.apply_seam(points, True, mode, vector(obj.SeamAxis), guide,
                              previous_start)
 
+    @staticmethod
+    def common_corner_count(obj, results):
+        """How many corners every section of this chain should split at.
+
+        ``None`` means the chain is already consistent and must be left alone.
+
+        ``Part.makeLoft`` needs compatible profiles.  Corner detection is
+        per-contour and honest about it: on a scanned mesh one section comes out
+        with 4 edges and its neighbour with 18, and the loft fails with nothing
+        more helpful than ``BRep_API: command not done``.
+
+        The fix is not to throw the corners away - that turned a sharp-featured
+        mask into a blob with 3 mm of error - nor to level down to the smallest
+        count, which spans real corners with a single spline and was worse still
+        at 1.75 mm.  It is to level *up*: every section splits into as many
+        pieces as the richest one, keeping all of its own corners and padding the
+        difference along the arc.
+        """
+        if not getattr(obj, "UniformChainTopology", True):
+            return None
+        counts = [len(result.edges) for _, result in results if result.ok]
+        if len(set(counts)) <= 1:
+            return None
+        return max(counts)
+
     def execute(self, obj):
         shape = self.source_shape(obj)
         if shape is None:
@@ -262,17 +295,31 @@ class FittedSections:
             deviation = 0.0
             kink = 0.0
 
+            unified = 0
             for chain in chains:
+                prepared = []
                 previous_start = None
-                fitted = 0
                 for section_index, contour_index in chain:
                     points, closed = groups[section_index][contour_index]
                     points = self.prepare(points, closed, direction, obj,
                                           previous_start)
                     if closed and len(points):
                         previous_start = points[0]
+                    prepared.append((section_index, contour_index, points, closed))
 
-                    result = fit_contour(points, closed, params)
+                results = [(entry, fit_contour(entry[2], entry[3], params))
+                           for entry in prepared]
+
+                target = self.common_corner_count(obj, results)
+                if target is not None:
+                    uniform = replace(params, corner_detection=True,
+                                      corner_target=target)
+                    results = [(entry, fit_contour(entry[2], entry[3], uniform))
+                               for entry in prepared]
+                    unified += 1
+
+                fitted = 0
+                for (section_index, contour_index, _, _), result in results:
                     if not result.ok:
                         failed.append(section_index)
                         warn("%s: section %d contour %d failed (%s)"
@@ -303,6 +350,8 @@ class FittedSections:
                                                  deviation))
         if len(obj.ChainSizes) > 1:
             obj.Status += ", %d chains" % len(obj.ChainSizes)
+        if unified:
+            obj.Status += ", %d chains refitted for uniform corners" % unified
         if obj.AmbiguousSections:
             obj.Status += ", %d ambiguous" % len(obj.AmbiguousSections)
 

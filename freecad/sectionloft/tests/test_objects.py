@@ -11,6 +11,7 @@ import Part
 
 from freecad.sectionloft.objects import (make_fitted_sections, make_section_loft,
                                          make_section_set)
+from freecad.sectionloft.objects.section_loft import SectionLoft
 from freecad.sectionloft.tests import fixtures as fx
 
 
@@ -102,6 +103,87 @@ class TestFittedSections(DocumentCase):
         self.assertEqual(list(fitted.ChainSizes), [3])
 
 
+class TestChainTopology(DocumentCase):
+    """Sections split into different edge counts cannot be lofted.
+
+    Found on a real scanned mesh: corner detection gave one section 4 edges and
+    its neighbour 18, and Part.makeLoft answered with 'BRep_API: command not
+    done'.  Four of seven chains failed, and the failing attempts took 18 of the
+    18.9 seconds the whole recompute needed.
+    """
+
+    def mixed_source(self):
+        """Rectangle, circle, rectangle - 4 corners, none, 4 corners."""
+        wires = []
+        for z, points in ((0.0, fx.rectangle(40, 30, 12, z=0.0)),
+                          (10.0, fx.circle(radius=18.0, n=64, z=10.0)),
+                          (20.0, fx.rectangle(40, 30, 12, z=20.0))):
+            vectors = [App.Vector(*p) for p in points]
+            wires.append(Part.makePolygon(vectors + [vectors[0]]))
+        source = self.doc.addObject("Part::Feature", "Mixed")
+        source.Shape = Part.Compound(wires)
+        return source
+
+    def test_mixed_corner_counts_are_unified(self):
+        fitted = make_fitted_sections(self.doc, self.mixed_source())
+        fitted.AutoTolerance = False
+        fitted.Tolerance = 0.2
+        self.doc.recompute()
+
+        edge_counts = {len(w.Edges) for w in fitted.Shape.Wires}
+        self.assertEqual(edge_counts, {4},
+                         "the chain still has mismatched profiles")
+        self.assertIn("refitted for uniform corners", fitted.Status)
+        Part.makeLoft(list(fitted.Shape.Wires), True, False, False)
+
+    def test_unifying_levels_up_and_keeps_the_corners(self):
+        """Levelling down to the smallest count spans real corners with one
+        spline; on the test mesh that tripled the deviation.  The rectangles
+        must keep their four edges, and the circle gains three split points."""
+        fitted = make_fitted_sections(self.doc, self.mixed_source())
+        fitted.AutoTolerance = False
+        fitted.Tolerance = 0.2
+        self.doc.recompute()
+
+        self.assertLess(fitted.MaxDeviation, 0.2)
+        corners = [v.Point for v in fitted.Shape.Wires[0].Vertexes]
+        self.assertEqual(len(corners), 4)
+
+    def test_a_consistent_chain_keeps_its_corners(self):
+        """The refit costs sharp edges, so it must not fire when the chain is
+        already loftable."""
+        wires = []
+        for z in (0.0, 10.0, 20.0):
+            points = [App.Vector(*p) for p in fx.rectangle(40, 30, 12, z=z)]
+            wires.append(Part.makePolygon(points + [points[0]]))
+        source = self.doc.addObject("Part::Feature", "Rects")
+        source.Shape = Part.Compound(wires)
+
+        fitted = make_fitted_sections(self.doc, source)
+        fitted.AutoTolerance = False
+        fitted.Tolerance = 0.2
+        self.doc.recompute()
+
+        self.assertEqual({len(w.Edges) for w in fitted.Shape.Wires}, {4})
+        self.assertNotIn("refitted", fitted.Status)
+
+    def test_the_refit_can_be_turned_off(self):
+        fitted = make_fitted_sections(self.doc, self.mixed_source())
+        fitted.AutoTolerance = False
+        fitted.Tolerance = 0.2
+        fitted.UniformChainTopology = False
+        self.doc.recompute()
+        self.assertEqual({len(w.Edges) for w in fitted.Shape.Wires}, {1, 4})
+
+    def test_lofting_the_unified_chain_end_to_end(self):
+        fitted = make_fitted_sections(self.doc, self.mixed_source())
+        loft = make_section_loft(self.doc, fitted)
+        self.doc.recompute()
+        self.assertTrue(loft.Shape.isValid())
+        self.assertGreater(loft.Volume, 0.0)
+        self.assertIn("lofted 1 of 1", loft.Status)
+
+
 class TestSectionLoft(DocumentCase):
     def test_volume_matches_the_analytic_cylinder(self):
         _, sections, fitted, loft = build_chain(self.doc)
@@ -155,6 +237,83 @@ class TestMultipleBodies(DocumentCase):
         centres = sorted(s.CenterOfMass.x for s in loft.Shape.Solids)
         self.assertLess(abs(centres[0] - 0.0), 2.0)
         self.assertLess(abs(centres[1] - 40.0), 2.0)
+
+
+class TestLoftValidity(DocumentCase):
+    """makeLoft returns something even when it cannot handle the input.
+
+    On the test mesh two of seven chains came back self-intersecting, one of
+    them reporting a volume of minus eighteen million cubic millimetres.
+    """
+
+    @staticmethod
+    def figure_eight(z):
+        points = [(-10, -5, z), (10, 5, z), (10, -5, z), (-10, 5, z)]
+        vectors = [App.Vector(*p) for p in points]
+        return Part.makePolygon(vectors + [vectors[0]])
+
+    def test_a_self_intersecting_loft_is_rejected(self):
+        broken = Part.makeLoft([self.figure_eight(0.0), self.figure_eight(10.0)],
+                               True, False, False)
+        self.assertFalse(broken.isValid(), "fixture stopped being invalid")
+
+        shape, reason = SectionLoft.usable(broken, solid=True)
+        self.assertIsNone(shape, "a degenerate loft was accepted")
+        self.assertIn("volume", reason)
+
+    def test_a_good_solid_passes_through_untouched(self):
+        box = Part.makeBox(10, 10, 10)
+        shape, reason = SectionLoft.usable(box, solid=True)
+        self.assertIsNotNone(shape)
+        self.assertIsNone(reason)
+        self.assertAlmostEqual(shape.Volume, 1000.0)
+
+    def test_an_empty_shape_is_rejected(self):
+        shape, reason = SectionLoft.usable(Part.Shape(), solid=True)
+        self.assertIsNone(shape)
+        self.assertEqual(reason, "empty")
+
+    def test_a_shell_is_not_judged_by_volume(self):
+        shell = Part.makeBox(10, 10, 10).Shells[0]
+        shape, reason = SectionLoft.usable(shell, solid=False)
+        self.assertIsNotNone(shape, reason)
+
+    def test_the_chain_result_is_always_valid(self):
+        _, _, _, loft = build_chain(self.doc)
+        self.assertTrue(loft.Shape.isValid())
+        self.assertEqual(list(loft.InvalidChains), [])
+
+
+class TestMeshVolumeCheck(DocumentCase):
+    """The sanity number that catches a result every other metric calls healthy."""
+
+    def test_a_faithful_result_is_near_one(self):
+        _, sections, _, loft = build_chain(self.doc)
+        # The outermost planes sit inside the mesh, so the loft is a little
+        # shorter than the cylinder it came from.
+        self.assertGreater(loft.MeshVolumeRatio, 0.9)
+        self.assertLess(loft.MeshVolumeRatio, 1.0)
+        self.assertNotIn("WARNING", loft.Status)
+
+    def test_the_ratio_reaches_the_mesh_through_the_chain(self):
+        mesh_obj, _, _, loft = build_chain(self.doc)
+        self.assertIs(loft.Proxy.source_mesh(loft), mesh_obj.Mesh)
+
+    def test_a_shell_has_no_ratio(self):
+        _, _, _, loft = build_chain(self.doc)
+        loft.Solid = False
+        self.doc.recompute()
+        self.assertEqual(loft.MeshVolumeRatio, 0.0)
+
+    def test_a_wild_ratio_is_called_out(self):
+        """Verified on the test mesh: six valid solids, no failed sections, a
+        0.3 mm fit deviation - and 248 times the volume of the mesh."""
+        _, _, _, loft = build_chain(self.doc)
+        mesh = loft.Proxy.source_mesh(loft)
+        self.assertIsNotNone(mesh)
+        loft.Volume = float(mesh.Volume) * 248.0
+        ratio = loft.Proxy.check_against_mesh(loft)
+        self.assertAlmostEqual(ratio, 248.0, places=3)
 
 
 class TestRecomputeChain(DocumentCase):

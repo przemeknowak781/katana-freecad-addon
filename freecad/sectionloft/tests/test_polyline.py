@@ -88,6 +88,62 @@ class TestSplit(unittest.TestCase):
         np.testing.assert_allclose(segments[-1][-1], pts[-1])
 
 
+class TestUniformSplits(unittest.TestCase):
+    """Making every section of a chain split into the same number of pieces."""
+
+    def rectangle(self):
+        pts = pl.douglas_peucker(fx.rectangle(40, 30, 12), 0.01, closed=True)
+        return pts, pl.detect_corners(pts, np.deg2rad(30.0), closed=True)
+
+    def test_strongest_corners_keeps_the_sharpest(self):
+        pts, corners = self.rectangle()
+        kept = pl.strongest_corners(pts, corners, 2, closed=True)
+        self.assertEqual(len(kept), 2)
+        self.assertTrue(set(kept).issubset(set(corners)))
+
+    def test_strongest_corners_is_a_no_op_below_the_limit(self):
+        pts, corners = self.rectangle()
+        self.assertEqual(pl.strongest_corners(pts, corners, 10, closed=True),
+                         corners)
+
+    def test_padding_reaches_the_target_by_inserting_points(self):
+        """A decimated rectangle is four points long, so the target can only be
+        reached by adding vertices - choosing among the existing ones caps the
+        count at four."""
+        pts, corners = self.rectangle()
+        self.assertEqual(len(pts), 4)
+        for target in (4, 6, 9, 13):
+            padded, splits = pl.pad_split_points(pts, corners, target,
+                                                 closed=True)
+            self.assertEqual(len(splits), target, "target %d" % target)
+            self.assertEqual(len(pl.split_at_corners(padded, splits, True)),
+                             target)
+
+    def test_inserted_points_lie_on_the_original_polyline(self):
+        pts, corners = self.rectangle()
+        padded, _ = pl.pad_split_points(pts, corners, 11, closed=True)
+        self.assertLess(pl.max_deviation(padded, pts, closed=True), 1e-9)
+
+    def test_padding_keeps_every_detected_corner(self):
+        pts, corners = self.rectangle()
+        padded, splits = pl.pad_split_points(pts, corners, 9, closed=True)
+        kept = [tuple(np.round(padded[i], 9)) for i in splits]
+        for corner in corners:
+            self.assertIn(tuple(np.round(pts[corner], 9)), kept)
+
+    def test_padding_a_contour_with_no_corners(self):
+        circle = fx.circle(radius=10.0, n=8)
+        padded, splits = pl.pad_split_points(circle, [], 5, closed=True)
+        self.assertEqual(len(splits), 5)
+        self.assertLess(pl.max_deviation(padded, circle, closed=True), 1e-9)
+
+    def test_padding_below_the_existing_count_is_a_no_op(self):
+        pts, corners = self.rectangle()
+        padded, splits = pl.pad_split_points(pts, corners, 2, closed=True)
+        self.assertEqual(splits, corners)
+        np.testing.assert_allclose(padded, pts)
+
+
 class TestDeviation(unittest.TestCase):
     def test_identical_polylines_have_zero_deviation(self):
         pts = fx.circle(n=40)

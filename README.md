@@ -3,7 +3,9 @@
 Siatka wejściowa → rodzina przekrojów → dopasowane krzywe B-spline → loft, dla FreeCAD.
 
 **Status: v0.2.** Algorytm, trzy obiekty parametryczne, parowanie konturów między
-przekrojami, kreator i workbench. 152 testy, wszystkie przechodzą na FreeCAD 1.1.3.
+przekrojami, kreator i workbench. 177 testów, wszystkie przechodzą na FreeCAD 1.1.3.
+Sprawdzone na siatkach analitycznych i na jednej prawdziwej — z tą ostatnią
+**narzędzie sobie nie radzi**, zobacz sekcję o prawdziwej siatce.
 
 Kolejność z §9 specyfikacji została zachowana: GUI powstało dopiero po tym, jak
 v0.1 rozstrzygnęła empirycznie, że aproksymacja daje krzywe nadające się do loftu.
@@ -98,7 +100,7 @@ print(report.status)
 > (`robocopy ... /XF run_tests.py bench.py`) albo testuj z pustym
 > `FREECAD_USER_HOME`.
 
-152 testy, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
+177 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
 panel nie importuje `FreeCADGui`, więc daje się zbudować na offscreenowym Qt
 i wyklikać programowo. Moduły `planes`, `contours`, `polyline` i `pairing` są
 czystym numpy i uruchamiają się zwykłym interpreterem:
@@ -216,6 +218,54 @@ Bez wchodzenia w stan Pythona, który nie przeżywa zapisu dokumentu:
 - `FittedSections` przyjmuje też zwykły compound wire'ów z dowolnego obiektu —
   wtedy każdy wire jest osobnym przekrojem.
 
+## Co się stało na prawdziwej siatce
+
+Pierwszy test na realnych danych: `robomask_neat (1).stl` — cienkościenna maska
+17×18×18 mm, 7460 trójkątów, zamknięta, ale z samoprzecięciami, od 1 do 6
+konturów na przekrój.
+
+**Wynik: narzędzie na tej siatce nie działa.** Powstaje gwiazda płaskich
+odłamków o objętości 66 894 mm³ przy 270 mm³ siatki — 248× za dużo.
+
+Najważniejsze w tym jest to, że **wszystkie wskaźniki świeciły na zielono**:
+zero nieudanych przekrojów, odchyłka 0,304 mm przy tolerancji 0,249 mm, sześć
+poprawnych brył, `isValid() == True`. Odchyłka dopasowania mierzy krzywe
+względem konturów. Nic nie mierzyło powierzchni względem obiektu. Dlatego doszła
+`MeshVolumeRatio` — najtańsza liczba, która to łapie, i ostrzeżenie w `Status`,
+gdy wynik odbiega od siatki więcej niż dwukrotnie.
+
+Po drodze wyszły trzy prawdziwe błędy, wszystkie naprawione:
+
+1. **Loft padał na 4 z 7 łańcuchów.** `ThruSections` wymaga zgodnych profili, a
+   detekcja narożników dawała w jednym przekroju 4 krawędzie, w sąsiednim 18.
+   Nieudane próby zjadały 17,95 s z 18,9 s całego przeliczenia. Rozwiązanie:
+   wyrównanie liczby podziałów w łańcuchu **w górę** — każdy przekrój zachowuje
+   swoje narożniki, brakujące podziały są dostawiane wzdłuż łuku. Wyrównywanie
+   w dół próbowałem najpierw i było gorsze: rozpinanie jednego splajnu przez
+   prawdziwe narożniki podniosło odchyłkę do 1,75 mm. Loft: 17,95 s → 0,54 s.
+2. **Dopełnianie podziałów nie osiągało celu**, bo po decymacji kontur
+   prostokątny ma cztery punkty — wybór spośród istniejących wierzchołków
+   ograniczał podział do czterech. Punkty są teraz **wstawiane** na polilinii
+   (leżą na niej dokładnie, odchyłka 0).
+3. **`makeLoft` zwracał śmieci nazwane wynikiem** — samoprzecinające się wire'y,
+   nieorientowalna powłoka, jedna bryła o objętości −18 843 788 mm³. Sama
+   walidacja nie wystarcza: `fix()` potrafi zrobić kształt poprawnym, zostawiając
+   go pustym. Bryła musi też zamykać dodatnią objętość.
+
+### Dlaczego to nie działa na tej siatce
+
+Maska to cienka powłoka ze szczelinami, a nie bryła opisana stosem przekrojów.
+Przekrój takiej powłoki to pierścień, czasem rozpadający się na kilka konturów
+przy szczelinach. Parowanie po centroidzie łączy wtedy kontury, które nie należą
+do jednej bryły, a loft przez zmieniającą się topologię daje przenikające się
+powierzchnie. To jest §11.2 w najtrudniejszej postaci i wymaga rozróżnienia
+konturu zewnętrznego od otworu — czego v0.2 nie robi.
+
+Narzędzie zostało zaprojektowane pod §1.3: obudowa wokół mechaniki, czyli obiekt
+zwarty. Na takim (walec, sfera, prostopadłościan) daje wyniki w granicach 0,12%
+objętości analitycznej. Cienkościenna powłoka ze szczelinami to inna klasa
+problemu.
+
 ## Znane ograniczenia v0.2
 
 - Szyny prowadzące (`Rails`) są zadeklarowane, ale jeszcze nieużywane — v0.3.
@@ -229,6 +279,10 @@ Bez wchodzenia w stan Pythona, który nie przeżywa zapisu dokumentu:
 - Loft z jednego łańcucha przy `StartCap = Szpic` i wyłączonej powierzchni
   prostokreślnej potrafi się wybrzuszyć przy wierzchołku — gładka powierzchnia
   od punktu do okręgu przestrzeliwuje promień. Zamierzone, ale warto wiedzieć.
+- **Cienkościenne powłoki i obiekty ze szczelinami nie działają** — zobacz
+  sekcję o prawdziwej siatce wyżej. Sprawdzaj `MeshVolumeRatio`; jeśli odbiega
+  od 1,0, wynik jest do wyrzucenia niezależnie od tego, co mówią pozostałe
+  liczby.
 
 ## Co dał test w prawdziwym GUI
 

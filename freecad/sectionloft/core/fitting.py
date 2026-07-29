@@ -33,6 +33,12 @@ class FitParams:
     decimate_factor: float = 0.25
     corner_detection: bool = True
     corner_angle: float = np.deg2rad(30.0)
+    #: Exact number of pieces a contour must be split into; 0 means "however
+    #: many corners there are".  Set per chain so that every section of a loft
+    #: has the same number of edges - see FittedSections.common_corner_count.
+    #: Too many detected corners are thinned to the sharpest, too few are padded
+    #: along the arc.
+    corner_target: int = 0
     seam_smoothing: bool = True
 
     #: A closed fit whose seam tangents differ by more than this is refitted at
@@ -264,6 +270,12 @@ def fit_contour(points, closed, params):
 
         corners = (pl.detect_corners(pts, params.corner_angle, closed)
                    if params.corner_detection else [])
+        if params.corner_target:
+            corners = pl.strongest_corners(pts, corners, params.corner_target,
+                                           closed)
+            pts, corners = pl.pad_split_points(pts, corners,
+                                               params.corner_target, closed)
+            result.points = pts
         result.corners = corners
 
         if closed and not corners:
