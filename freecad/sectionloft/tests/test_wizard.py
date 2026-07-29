@@ -126,6 +126,30 @@ class TestWizardControls(WizardCase):
         self.assertFalse(self.wizard.loft.Solid)
         self.assertEqual(self.wizard.loft.Volume, 0.0)
 
+    def test_envelope_checkbox_brings_its_companions(self):
+        """Envelope mode only contains the part if the surface is ruled and the
+        outermost planes are pulled off the silhouette; asking the user to know
+        that would defeat the point of a checkbox."""
+        self.assertFalse(self.wizard.clearance_spin.isEnabled())
+
+        self.wizard.envelope_check.setChecked(True)
+        self.wizard.recompute()
+
+        self.assertEqual(str(self.wizard.sections.ContourMode), "Envelope")
+        self.assertTrue(self.wizard.loft.Ruled)
+        self.assertEqual(self.wizard.sections.Inset, 1)
+        self.assertGreater(self.wizard.clearance_spin.value(), 0.0)
+        self.assertTrue(self.wizard.clearance_spin.isEnabled())
+        self.assertEqual(list(self.wizard.sections.ContourCount),
+                         [1] * len(list(self.wizard.sections.ContourCount)))
+
+    def test_turning_the_envelope_off_restores_contours(self):
+        self.wizard.envelope_check.setChecked(True)
+        self.wizard.envelope_check.setChecked(False)
+        self.wizard.recompute()
+        self.assertEqual(str(self.wizard.sections.ContourMode), "All")
+        self.assertFalse(self.wizard.clearance_spin.isEnabled())
+
     def test_advanced_section_is_folded_away_by_default(self):
         """Not merely disabled - hidden.  A greyed-out block still occupies the
         panel and pushes the deviation readout out of view."""

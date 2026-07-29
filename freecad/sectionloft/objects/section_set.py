@@ -66,6 +66,21 @@ class SectionSet:
                      "Nudge planes off rows of coplanar mesh vertices, where "
                      "the cross-section walks the ring twice instead of once",
                      default=True)
+        add_property(obj, "App::PropertyEnumeration", "ContourMode",
+                     GROUP_FILTER,
+                     "All keeps every contour a plane cuts. Envelope replaces "
+                     "them with their outer boundary - the right choice for "
+                     "thin-walled parts, whose sections are ribbons that cannot "
+                     "be lofted, and for anything with slots",
+                     enum=list(pp.CONTOUR_MODES), default=pp.MODE_ALL)
+        add_property(obj, "App::PropertyInteger", "EnvelopeSamples",
+                     GROUP_FILTER,
+                     "Number of rays used to trace the envelope", default=180)
+        add_property(obj, "App::PropertyLength", "Clearance", GROUP_FILTER,
+                     "Push the envelope out by this much. A surface lofted "
+                     "between planes cuts inside the part wherever it bulges "
+                     "in between, so a packaging envelope needs a little air",
+                     default=0.0)
         add_property(obj, "App::PropertyLength", "MinContourLength",
                      GROUP_FILTER,
                      "Contours shorter than this are dropped as artefacts",
@@ -118,6 +133,9 @@ class SectionSet:
             range_end=None if obj.AutoRange else value(obj.RangeEnd),
             inset=float(obj.Inset) / 100.0,
             avoid_vertex_rows=bool(obj.AvoidVertexRows),
+            contour_mode=str(obj.ContourMode),
+            envelope_samples=max(24, int(obj.EnvelopeSamples)),
+            clearance=value(obj.Clearance),
             min_contour_length=value(obj.MinContourLength),
             close_tolerance=close_tolerance,
             # Orientation and seam belong to FittedSections: they are fitting

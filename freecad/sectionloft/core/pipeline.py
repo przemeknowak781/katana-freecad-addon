@@ -14,6 +14,7 @@ import FreeCAD as App
 import Part
 
 from . import contours as ct
+from . import envelope as ev
 from . import planes as pf
 from . import polyline as pl
 from .fitting import FitParams, fit_contour
@@ -34,6 +35,11 @@ def _log(message):
     App.Console.PrintMessage(LOG_PREFIX + message + "\n")
 
 
+MODE_ALL = "All"
+MODE_ENVELOPE = "Envelope"
+CONTOUR_MODES = (MODE_ALL, MODE_ENVELOPE)
+
+
 @dataclass
 class SliceParams:
     origin: object = None                 # None -> bbox centre
@@ -49,6 +55,9 @@ class SliceParams:
     slice_tolerance: float = 1e-6
     avoid_vertex_rows: bool = True
     vertex_row_nudge: float = 1e-3        # fraction of the span along Direction
+    contour_mode: str = MODE_ALL
+    envelope_samples: int = 180
+    clearance: float = 0.0
 
     # Fitting tolerance derivation, kept here because it depends on the mesh.
     auto_tolerance: bool = True
@@ -182,6 +191,25 @@ def slice_mesh(mesh, params=None):
     fc_planes = [(App.Vector(*base), App.Vector(*normal)) for base, normal in planes]
     raw = mesh.crossSections(fc_planes, float(params.slice_tolerance))
 
+    vertices = axis_point = None
+    slab_half_width = 0.0
+    if params.contour_mode == MODE_ENVELOPE:
+        vertices = mesh_points(mesh)
+        # One axis for the whole family, so the radial profiles of neighbouring
+        # sections are measured from the same place.
+        axis_point = origin
+        # Half the plane spacing, so the slabs tile the part without overlapping
+        # more than they have to.
+        offsets = [float(np.dot(base - planes[0][0], direction))
+                   for base, _ in planes]
+        gaps = np.diff(offsets) if len(offsets) > 1 else np.array([0.0])
+        # A full spacing, not half.  Half-width slabs tile the part, but the
+        # loft interpolates between two neighbouring profiles, and a point
+        # sitting between them is only guaranteed to be contained if *both*
+        # profiles already cover its height.
+        slab_half_width = float(np.median(np.abs(gaps))) if len(gaps) else 0.0
+    direction = planes[0][1] if planes else np.array([0.0, 0.0, 1.0])
+
     sections = []
     previous_start = None
     for i, (plane, per_plane) in enumerate(zip(planes, raw)):
@@ -218,8 +246,53 @@ def slice_mesh(mesh, params=None):
                                     params.seam_guide, previous_start)
                 previous_start = pts[0]
             section.contours.append(Contour(pts, closed, i, reversed_))
+
+        if params.contour_mode == MODE_ENVELOPE:
+            _replace_with_envelope(section, params, vertices, direction,
+                                   slab_half_width, axis_point)
         sections.append(section)
     return sections
+
+
+def _replace_with_envelope(section, params, vertices=None, direction=None,
+                           slab=0.0, axis_point=None):
+    """Collapse a section's contours to their outer boundary, in place.
+
+    Everything downstream gets simpler: one contour per plane means no pairing,
+    a radial profile cannot self-intersect, and every section carries the same
+    points in the same angular order, so the loft has nothing left to twist.
+
+    Given the mesh vertices, the envelope is taken over a slab around the plane
+    rather than the cut itself, so that features falling between planes are
+    contained rather than shaved off.
+    """
+    if not section.contours:
+        return
+
+    outline = None
+    if vertices is not None and slab > 0.0:
+        offsets = (vertices - section.base) @ direction
+        slab_points = vertices[np.abs(offsets) <= slab]
+        if len(slab_points) >= 8:
+            outline = ev.envelope_from_slab(
+                slab_points, section.base, section.normal,
+                samples=int(params.envelope_samples),
+                clearance=float(params.clearance),
+                axis_point=axis_point)
+
+    if outline is None:
+        outline = ev.envelope_contour(
+            [c.points for c in section.contours], section.base, section.normal,
+            samples=int(params.envelope_samples),
+            clearance=float(params.clearance))
+    if outline is None or len(outline) < 3:
+        _warn("section %d: could not build an envelope, keeping the contours"
+              % section.index)
+        return
+
+    outline, _ = ct.unify_orientation(outline, section.normal, section.base)
+    section.rejected += max(0, len(section.contours) - 1)
+    section.contours = [Contour(outline, True, section.index, False)]
 
 
 def sections_to_shape(sections, primary_only=False):

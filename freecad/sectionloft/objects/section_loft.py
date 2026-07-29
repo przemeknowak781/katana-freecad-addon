@@ -5,7 +5,7 @@ import numpy as np
 import FreeCAD as App
 import Part
 
-from .common import ViewProviderBase, add_property, warn
+from .common import ViewProviderBase, add_property, value, warn
 
 GROUP_SOURCE = "Source"
 GROUP_SURFACE = "Surface"
@@ -57,9 +57,14 @@ class SectionLoft:
                      read_only=True)
         add_property(obj, "App::PropertyFloat", "MeshVolumeRatio", GROUP_INFO,
                      "Result volume divided by the volume of the source mesh. "
-                     "1.0 is a faithful result; anything far from it means the "
-                     "sections were paired into bodies that are not there",
-                     read_only=True)
+                     "Meaningful only when the mesh is a solid body: for a thin "
+                     "wall the mesh encloses just the material, so an envelope "
+                     "is legitimately many times larger", read_only=True)
+        add_property(obj, "App::PropertyFloat", "SectionVolumeRatio", GROUP_INFO,
+                     "Result volume divided by the volume its own sections "
+                     "imply. 1.0 means the surface follows the sections it was "
+                     "built from; this is the number that catches a loft which "
+                     "has folded over itself", read_only=True)
         add_property(obj, "App::PropertyString", "Status", GROUP_INFO,
                      "Result of the last recompute", read_only=True)
 
@@ -132,9 +137,21 @@ class SectionLoft:
             if candidate is None:
                 return None, "invalid geometry (self-intersecting or unorientable)"
 
-        if solid and candidate.Volume <= 1e-9:
-            return None, ("encloses no volume (%.3f mm3), the sections do not "
-                          "bound a body" % candidate.Volume)
+        if solid:
+            # A negative volume is an inside-out shell, not a bad one: the sign
+            # depends on which way makeLoft happened to orient the surface.  Flip
+            # it rather than throwing away geometry that is otherwise correct.
+            if candidate.Volume < 0.0:
+                try:
+                    flipped = candidate.copy()
+                    flipped.reverse()
+                    if flipped.isValid() and flipped.Volume > 0.0:
+                        candidate = flipped
+                except Exception:  # noqa: BLE001
+                    pass
+            if candidate.Volume <= 1e-9:
+                return None, ("encloses no volume (%.3f mm3), the sections do "
+                              "not bound a body" % candidate.Volume)
         return candidate, None
 
     @staticmethod
@@ -150,6 +167,61 @@ class SectionLoft:
             node = getattr(node, "Source", None)
         return None
 
+    @staticmethod
+    def section_volume(obj):
+        """Volume the section wires imply, by the trapezoid rule.
+
+        Each wire is turned into a face to get its area, the areas are
+        integrated along the loft direction, and the answer is what the solid
+        would measure if the surface simply joined its sections without folding.
+        Unlike a comparison against the mesh this works for a thin wall too,
+        where the mesh encloses only the material and an envelope is
+        legitimately many times bigger.
+        """
+        sections = getattr(obj, "Sections", None)
+        shape = getattr(sections, "Shape", None)
+        if shape is None or shape.isNull() or len(shape.Wires) < 2:
+            return 0.0
+
+        sizes = [int(n) for n in (getattr(sections, "ChainSizes", []) or [])]
+        wires = list(shape.Wires)
+        if not sizes or sum(sizes) != len(wires):
+            sizes = [len(wires)]
+
+        total = 0.0
+        index = 0
+        for size in sizes:
+            chain = wires[index:index + size]
+            index += size
+            samples = []
+            for wire in chain:
+                try:
+                    face = Part.Face(wire)
+                    area = abs(face.Area)
+                    centre = face.CenterOfMass
+                    normal = face.normalAt(0, 0)
+                except Exception:  # noqa: BLE001 - a non-planar wire has no face
+                    continue
+                samples.append((np.array([centre.x, centre.y, centre.z]),
+                                np.array([normal.x, normal.y, normal.z]), area))
+            for k in range(len(samples) - 1):
+                (centre_a, normal_a, area_a) = samples[k]
+                (centre_b, _, area_b) = samples[k + 1]
+                step = abs(float(np.dot(centre_b - centre_a, normal_a)))
+                total += 0.5 * (area_a + area_b) * step
+        return total
+
+    def check_against_sections(self, obj):
+        implied = self.section_volume(obj)
+        if implied <= 1e-9:
+            return 0.0
+        ratio = float(obj.Volume) / implied
+        if not 0.75 <= ratio <= 1.25:
+            warn("%s: the surface encloses %.2fx the volume its own sections "
+                 "imply - it is folding over itself somewhere"
+                 % (obj.Name, ratio))
+        return ratio
+
     def check_against_mesh(self, obj):
         """Compare the result volume with the mesh it came from.
 
@@ -163,12 +235,7 @@ class SectionLoft:
         mesh = self.source_mesh(obj)
         if mesh is None or not mesh.isSolid() or mesh.Volume <= 0:
             return 0.0
-        ratio = float(obj.Volume) / float(mesh.Volume)
-        if ratio and not 0.5 <= ratio <= 2.0:
-            warn("%s: the result encloses %.1fx the volume of the mesh - the "
-                 "sections are probably being paired into bodies that are not "
-                 "there" % (obj.Name, ratio))
-        return ratio
+        return float(obj.Volume) / float(mesh.Volume)
 
     def execute(self, obj):
         chains = self.chains(obj)
@@ -222,9 +289,10 @@ class SectionLoft:
             obj.Status += ", %d rejected as invalid" % len(invalid)
 
         obj.MeshVolumeRatio = self.check_against_mesh(obj) if solid else 0.0
-        if obj.MeshVolumeRatio and not 0.5 <= obj.MeshVolumeRatio <= 2.0:
-            obj.Status += (", WARNING %.1fx the mesh volume"
-                           % obj.MeshVolumeRatio)
+        obj.SectionVolumeRatio = self.check_against_sections(obj) if solid else 0.0
+        if obj.SectionVolumeRatio and not 0.75 <= obj.SectionVolumeRatio <= 1.25:
+            obj.Status += (", WARNING %.2fx the volume its sections imply"
+                           % obj.SectionVolumeRatio)
         for message in failures:
             warn("%s: %s" % (obj.Name, message))
 

@@ -166,12 +166,58 @@ class SectionLoftWizard:
         row.addWidget(self.count_label)
         layout.addRow("Liczba przekrojów:", row)
 
+        self.envelope_check = QtWidgets.QCheckBox(
+            "Obwiednia zamiast konturów")
+        self.envelope_check.setToolTip(
+            "Zastępuje kontury przekroju ich zewnętrznym obrysem. Włącz dla "
+            "części cienkościennych i wszystkiego ze szczelinami - przekrój "
+            "takiej części to wstęga, której nie da się zloftować.")
+        self.envelope_check.toggled.connect(self._on_envelope)
+        layout.addRow(self.envelope_check)
+
+        self.clearance_spin = QtWidgets.QDoubleSpinBox()
+        self.clearance_spin.setRange(0.0, 50.0)
+        self.clearance_spin.setSingleStep(0.1)
+        self.clearance_spin.setDecimals(2)
+        self.clearance_spin.setSuffix(" mm")
+        self.clearance_spin.setToolTip(
+            "Odsunięcie obwiedni na zewnątrz. Powierzchnia rozpięta między "
+            "płaszczyznami wcina się w część tam, gdzie ta wybrzusza się "
+            "pomiędzy nimi.")
+        self.clearance_spin.valueChanged.connect(
+            lambda v: self._set(self.sections, "Clearance", v))
+        self.clearance_row = QtWidgets.QLabel("Luz:")
+        layout.addRow(self.clearance_row, self.clearance_spin)
+        self._enable_clearance(False)
+
         hint = QtWidgets.QLabel(
             "Mniej przekrojów daje gładszą powierzchnię. Dokładanie ich "
             "prawie zawsze psuje loft.")
         hint.setWordWrap(True)
         layout.addRow(hint)
         return page
+
+    def _enable_clearance(self, enabled):
+        self.clearance_spin.setEnabled(enabled)
+        self.clearance_row.setEnabled(enabled)
+
+    def _on_envelope(self, checked):
+        """Envelope mode brings its own sensible companions.
+
+        A ruled surface interpolates linearly between sections, which is what
+        makes the envelope actually contain the part; a smooth one dips inside
+        between planes.  A small inset keeps the outermost planes off the
+        silhouette while still reaching the ends.
+        """
+        self.sections.ContourMode = "Envelope" if checked else "All"
+        self._enable_clearance(checked)
+        if checked:
+            self.sections.Inset = 1
+            self.loft.Ruled = True
+            self.ruled_check.setChecked(True)
+            if self.clearance_spin.value() == 0.0:
+                self.clearance_spin.setValue(0.3)
+        self._timer.start()
 
     def _page_fit(self):
         page = QtWidgets.QWidget()

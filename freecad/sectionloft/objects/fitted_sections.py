@@ -208,6 +208,20 @@ class FittedSections:
 
         return float(np.clip(obj.ToleranceFactor * median, *TOLERANCE_LIMITS))
 
+    @staticmethod
+    def corners_wanted(obj):
+        """Corner splitting, unless the source is producing envelopes.
+
+        An envelope is a radial profile: smooth by construction, and its corners
+        - where they exist at all - sit at whatever angle the sampling happened
+        to catch them.  They do not correspond between sections, so splitting
+        there gives the loft a set of edges that do not line up.  Measured on the
+        test mesh at 30 sections: the surface came out enclosing 36 times the
+        volume its own sections implied.  Use ContourMode All to keep corners.
+        """
+        mode = str(getattr(getattr(obj, "Source", None), "ContourMode", "All"))
+        return bool(obj.CornerDetection) and mode != "Envelope"
+
     def fit_params(self, obj, tolerance):
         return FitParams(
             tolerance=tolerance,
@@ -216,7 +230,7 @@ class FittedSections:
             continuity=str(obj.Continuity),
             decimate=bool(obj.Decimate),
             decimate_factor=float(obj.DecimateFactor),
-            corner_detection=bool(obj.CornerDetection),
+            corner_detection=self.corners_wanted(obj),
             corner_angle=np.deg2rad(value(obj.CornerAngle)),
             seam_smoothing=bool(obj.SeamSmoothing),
             max_seam_kink=np.deg2rad(value(obj.MaxSeamKink)))
@@ -310,7 +324,8 @@ class FittedSections:
                 results = [(entry, fit_contour(entry[2], entry[3], params))
                            for entry in prepared]
 
-                target = self.common_corner_count(obj, results)
+                target = (self.common_corner_count(obj, results)
+                          if params.corner_detection else None)
                 if target is not None:
                     uniform = replace(params, corner_detection=True,
                                       corner_target=target)
@@ -352,6 +367,8 @@ class FittedSections:
             obj.Status += ", %d chains" % len(obj.ChainSizes)
         if unified:
             obj.Status += ", %d chains refitted for uniform corners" % unified
+        if obj.CornerDetection and not self.corners_wanted(obj):
+            obj.Status += ", corners off (envelope sections)"
         if obj.AmbiguousSections:
             obj.Status += ", %d ambiguous" % len(obj.AmbiguousSections)
 

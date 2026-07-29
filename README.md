@@ -3,9 +3,10 @@
 Siatka wejściowa → rodzina przekrojów → dopasowane krzywe B-spline → loft, dla FreeCAD.
 
 **Status: v0.2.** Algorytm, trzy obiekty parametryczne, parowanie konturów między
-przekrojami, kreator i workbench. 177 testów, wszystkie przechodzą na FreeCAD 1.1.3.
-Sprawdzone na siatkach analitycznych i na jednej prawdziwej — z tą ostatnią
-**narzędzie sobie nie radzi**, zobacz sekcję o prawdziwej siatce.
+przekrojami, tryb obwiedni, kreator i workbench. 205 testów, wszystkie przechodzą
+na FreeCAD 1.1.3. Sprawdzone na siatkach analitycznych i na prawdziwym skanie
+cienkościennej maski — ta ostatnia wymaga **trybu obwiedni**, w trybie konturów
+wychodzi bez sensu.
 
 Kolejność z §9 specyfikacji została zachowana: GUI powstało dopiero po tym, jak
 v0.1 rozstrzygnęła empirycznie, że aproksymacja daje krzywe nadające się do loftu.
@@ -100,7 +101,7 @@ print(report.status)
 > (`robocopy ... /XF run_tests.py bench.py`) albo testuj z pustym
 > `FREECAD_USER_HOME`.
 
-177 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
+205 testów, wszystkie przechodzą na FreeCAD 1.1.3. Kreator też jest testowany —
 panel nie importuje `FreeCADGui`, więc daje się zbudować na offscreenowym Qt
 i wyklikać programowo. Moduły `planes`, `contours`, `polyline` i `pairing` są
 czystym numpy i uruchamiają się zwykłym interpreterem:
@@ -218,14 +219,63 @@ Bez wchodzenia w stan Pythona, który nie przeżywa zapisu dokumentu:
 - `FittedSections` przyjmuje też zwykły compound wire'ów z dowolnego obiektu —
   wtedy każdy wire jest osobnym przekrojem.
 
+## Tryb obwiedni — dla cienkościennych i podziurawionych
+
+`SectionSet.ContourMode = Envelope` zastępuje kontury przekroju ich zewnętrznym
+obrysem. W kreatorze to checkbox „Obwiednia zamiast konturów", który ustawia też
+powierzchnię prostokreślną i niewielkie odsunięcie skrajnych płaszczyzn, bo bez
+tego obwiednia nie obejmuje części.
+
+Definicja jest celowo twarda: **obwiednia przekroju to otoczka wypukła punktów
+siatki w plastrze wokół płaszczyzny**, próbkowana promieniowo ze wspólnej osi.
+Dzięki temu:
+
+- zawieranie części wynika z definicji, a nie z pomiaru po fakcie,
+- profil nie może się samoprzeciąć,
+- każdy przekrój ma tyle samo punktów w tej samej kolejności kątowej, więc loft
+  nie ma czym skręcić,
+- na przekrój przypada jeden kontur, więc nie ma czego parować.
+
+Cena: wklęsłości są mostkowane — część z przewężeniem wraca beczkowata. Wszystko
+łagodniejsze, co próbowałem (najdalsze trafienie promienia, maksima w koszykach
+kątowych, otoczka tylko przy rzadkim materiale), dawało przekroje sprzeczne
+z sąsiadami i lofty rozpadające się na odłamki.
+
+Plaster ma szerokość **pełnego** rozstawu płaszczyzn, nie połowy: loft
+interpoluje między dwoma sąsiednimi profilami, więc punkt między nimi jest
+objęty tylko wtedy, gdy oba profile pokrywają jego wysokość.
+
+### Wynik na `robomask_neat (1).stl`
+
+20 przekrojów wzdłuż Z, obwiednia, `Inset = 1%`, `Clearance = 0,3 mm`,
+powierzchnia prostokreślna:
+
+| Miara | Wartość |
+|---|---|
+| Bryła | 1 zamknięta, `isValid() == True` |
+| Objętość | 2110 mm³ |
+| `SectionVolumeRatio` | 1,033 |
+| Wierzchołki siatki poza obwiednią | **2 z 265 (0,8%)**, z tego 1 promieniowo |
+| Pokrycie w osi | z 0,18 do 18,00 przy części 0–18,18 |
+| Czas | ok. 2 s |
+
+Dla porównania, ten sam plik w trybie `All`: gwiazda płaskich odłamków,
+objętość 66 894 mm³ przy 270 mm³ siatki.
+
+**Powierzchnia prostokreślna nie jest tu kosmetyką.** Gładki loft podcina się
+między płaszczyznami; prostokreślny interpoluje liniowo, więc jeśli oba sąsiednie
+profile obejmują daną wysokość, to obejmuje ją też powierzchnia. Zmierzone:
+gładka 12,5% wierzchołków poza obwiednią, prostokreślna 0,4%.
+
 ## Co się stało na prawdziwej siatce
 
 Pierwszy test na realnych danych: `robomask_neat (1).stl` — cienkościenna maska
 17×18×18 mm, 7460 trójkątów, zamknięta, ale z samoprzecięciami, od 1 do 6
 konturów na przekrój.
 
-**Wynik: narzędzie na tej siatce nie działa.** Powstaje gwiazda płaskich
-odłamków o objętości 66 894 mm³ przy 270 mm³ siatki — 248× za dużo.
+**W trybie `All` narzędzie na tej siatce nie działa.** Powstaje gwiazda płaskich
+odłamków o objętości 66 894 mm³ przy 270 mm³ siatki — 248× za dużo. Rozwiązaniem
+jest tryb obwiedni opisany wyżej; poniżej zapis tego, co po drodze wyszło.
 
 Najważniejsze w tym jest to, że **wszystkie wskaźniki świeciły na zielono**:
 zero nieudanych przekrojów, odchyłka 0,304 mm przy tolerancji 0,249 mm, sześć
@@ -252,19 +302,29 @@ Po drodze wyszły trzy prawdziwe błędy, wszystkie naprawione:
    walidacja nie wystarcza: `fix()` potrafi zrobić kształt poprawnym, zostawiając
    go pustym. Bryła musi też zamykać dodatnią objętość.
 
-### Dlaczego to nie działa na tej siatce
+4. **Dopasowanie łamało własną obietnicę tolerancji.** Decymacja jest dokładna
+   (180 punktów → 23, błąd 0,059 mm), ale splajn przepuszczony przez rzadkie
+   punkty przestrzeliwuje **między** nimi: 4,4 mm przy tolerancji 0,249 mm, czyli
+   18× za dużo. Aproksymacja spełniała tolerancję względem punktów zdecymowanych,
+   a nie względem oryginału. Odchyłka jest teraz mierzona względem oryginalnej
+   polilinii, a przy przekroczeniu tolerancji dopasowanie jest powtarzane
+   z mniejszą decymacją i w końcu bez niej. Po poprawce: 0,089–0,189 mm.
+
+### Dlaczego tryb `All` nie działa na tej siatce
 
 Maska to cienka powłoka ze szczelinami, a nie bryła opisana stosem przekrojów.
-Przekrój takiej powłoki to pierścień, czasem rozpadający się na kilka konturów
-przy szczelinach. Parowanie po centroidzie łączy wtedy kontury, które nie należą
-do jednej bryły, a loft przez zmieniającą się topologię daje przenikające się
-powierzchnie. To jest §11.2 w najtrudniejszej postaci i wymaga rozróżnienia
-konturu zewnętrznego od otworu — czego v0.2 nie robi.
+Przekrój takiej powłoki nie jest nawet pierścieniem z otworem — pomiar pokazał
+**jeden zamknięty kontur obiegający ściankę tam i z powrotem**: pole 10,33 mm²
+przy obwodzie 41,6 mm, czyli wstęga o grubości ~0,5 mm. Loft między takimi
+wstęgami z natury się przenika, a przy szczelinach wstęga rozpada się na kilka
+konturów i parowanie po centroidzie łączy te z różnych brył.
 
-Narzędzie zostało zaprojektowane pod §1.3: obudowa wokół mechaniki, czyli obiekt
-zwarty. Na takim (walec, sfera, prostopadłościan) daje wyniki w granicach 0,12%
-objętości analitycznej. Cienkościenna powłoka ze szczelinami to inna klasa
-problemu.
+Dlatego tryb obwiedni nie jest obejściem, tylko właściwym postawieniem pytania:
+§1.3 buduje obudowę **wokół** mechaniki i zostawia ścianki dla `Part Thickness`,
+a obwiednia jest dokładnie tym, czego ten przepływ potrzebuje na wejściu.
+
+Tryb `All` pozostaje właściwy dla obiektów zwartych — walec, sfera,
+prostopadłościan wychodzą w granicach 0,12% objętości analitycznej.
 
 ## Znane ograniczenia v0.2
 
@@ -279,10 +339,13 @@ problemu.
 - Loft z jednego łańcucha przy `StartCap = Szpic` i wyłączonej powierzchni
   prostokreślnej potrafi się wybrzuszyć przy wierzchołku — gładka powierzchnia
   od punktu do okręgu przestrzeliwuje promień. Zamierzone, ale warto wiedzieć.
-- **Cienkościenne powłoki i obiekty ze szczelinami nie działają** — zobacz
-  sekcję o prawdziwej siatce wyżej. Sprawdzaj `MeshVolumeRatio`; jeśli odbiega
-  od 1,0, wynik jest do wyrzucenia niezależnie od tego, co mówią pozostałe
-  liczby.
+- **Cienkościenne powłoki i obiekty ze szczelinami wymagają trybu obwiedni.**
+  W trybie `All` dają wynik bez sensu. Sprawdzaj `SectionVolumeRatio`; jeśli
+  odbiega od 1,0, powierzchnia zawija się sama na siebie niezależnie od tego, co
+  mówią pozostałe liczby.
+- Obwiednia mostkuje wklęsłości — część z przewężeniem wraca beczkowata.
+- Obwiednia nie sięga ostatnich ułamków milimetra na końcach zakresu, bo skrajne
+  płaszczyzny muszą być odsunięte od sylwetki. Przy `Inset = 1%` to 1% wysokości.
 
 ## Co dał test w prawdziwym GUI
 
